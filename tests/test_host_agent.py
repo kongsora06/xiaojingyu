@@ -1,0 +1,1293 @@
+import asyncio
+import json
+import time
+from contextlib import nullcontext
+from dataclasses import replace
+from datetime import datetime, timedelta
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
+import discord
+import httpx2
+import pytest
+from openai import AsyncOpenAI
+
+from discord_dfy import host_agent
+from discord_dfy.ai import BASE_URL
+from discord_dfy.config import ConfigurationError, Settings, parse_quiet_hours
+from discord_dfy.conversation_store import ConversationStore
+from discord_dfy.discord_bot import DiscordAgent
+from discord_dfy.host_agent import (
+    COMPACT_PROMPT,
+    STOPPED_RESULT,
+    SUMMARY_PREFIX,
+    HostAgent,
+    fit,
+    request_messages,
+    split_for_compaction,
+    transcript,
+)
+from discord_dfy.host_tools import HostTools, ToolError, describe_call
+from discord_dfy.initiative import SELF_TAG, Initiative, ago, in_quiet_hours
+from discord_dfy.monitor_protocol import Publisher
+from discord_dfy.service import AgentService
+
+OWNER = 20
+CHANNEL = 200
+
+
+def completion(content="", calls=(), reasoning=None):
+    message = {"role": "assistant", "content": content}
+    if calls:
+        message["tool_calls"] = [
+            {
+                "id": f"call_{index}",
+                "type": "function",
+                "function": {"name": name, "arguments": json.dumps(arguments)},
+            }
+            for index, (name, arguments) in enumerate(calls)
+        ]
+    if reasoning:
+        message["reasoning_content"] = reasoning
+    return {
+        "id": "chatcmpl-test",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "deepseek-flash",
+        "choices": [{"index": 0, "message": message, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+    }
+
+
+class Provider:
+    """Scripted DeepSeek: each request pops the next response and is recorded."""
+
+    def __init__(self, *responses):
+        self.responses = list(responses)
+        self.bodies = []
+
+    async def __call__(self, request):
+        self.bodies.append(json.loads(request.content))
+        response = self.responses.pop(0)
+        if isinstance(response, int):
+            return httpx2.Response(response, json={"error": {"message": "boom"}})
+        return httpx2.Response(200, json=response)
+
+
+class Chat:
+    def __init__(self):
+        self.sent = []
+        self.files = []
+
+    async def send(self, text):
+        self.sent.append(text)
+
+    async def send_file(self, path):
+        self.files.append(path)
+
+    def typing(self):
+        return nullcontext()
+
+
+@pytest.fixture
+def agent_settings(settings, tmp_path):
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    return replace(
+        settings,
+        personal_mode_enabled=True,
+        owner_discord_user_id=OWNER,
+        personal_database_path=tmp_path / "personal.sqlite3",
+        agent_workdir=workdir,
+        agent_memory_path=tmp_path / "memory.md",
+        agent_reflect_seconds=0,
+    )
+
+
+@pytest.fixture
+async def store(agent_settings):
+    conversations = ConversationStore(agent_settings.personal_database_path)
+    await conversations.open()
+    yield conversations
+    await conversations.close()
+
+
+@pytest.fixture
+async def make_agent(agent_settings, store):
+    created = []
+
+    async def build(provider, **overrides):
+        client = AsyncOpenAI(
+            api_key="fake-test-key",
+            base_url=BASE_URL,
+            max_retries=0,
+            http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(provider)),
+        )
+        agent = HostAgent(replace(agent_settings, **overrides), client, store)
+        created.append((agent, client))
+        return agent
+
+    yield build
+    for agent, client in created:
+        await agent.close()
+        await client.close()
+
+
+async def say(agent, chat, content):
+    handled = await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content=content, chat=chat)
+    worker = agent.workers.get(CHANNEL)
+    if worker is not None:
+        await asyncio.wait_for(asyncio.shield(worker), 30)
+    return handled
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"owner_id": 21},
+        {"guild_id": 10},
+        {"is_bot": True},
+        {"webhook_id": 5},
+        {"direct_dm": False},
+    ],
+)
+async def test_only_owner_direct_dms_reach_the_agent(make_agent, overrides):
+    provider = Provider()
+    agent = await make_agent(provider)
+    arguments = {"owner_id": OWNER, "channel_id": CHANNEL, "content": "hi", "chat": Chat()}
+    assert not await agent.handle_dm(**{**arguments, **overrides})
+    assert not agent.workers and provider.bodies == []
+
+
+async def test_disabled_personal_mode_ignores_owner(make_agent):
+    agent = await make_agent(Provider(), personal_mode_enabled=False)
+    assert not await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="hi", chat=Chat())
+
+
+async def test_tool_loop_runs_powershell_on_host_and_reports(make_agent, store, agent_settings):
+    provider = Provider(
+        completion("我看看", [("powershell", {"command": "Write-Output '中文ok'"})], "想一想"),
+        completion("弄好了"),
+    )
+    agent = await make_agent(provider)
+    chat = Chat()
+    assert await say(agent, chat, "帮我跑个命令")
+    assert chat.sent[0] == "我看看"
+    assert "`powershell`" in chat.sent[1] and chat.sent[1].startswith("-# 🔧")
+    assert chat.sent[-1] == "弄好了"
+    first, second = provider.bodies
+    assert first["model"] == "deepseek-flash" and first["thinking"] == {"type": "enabled"}
+    assert {tool["function"]["name"] for tool in first["tools"]} == {
+        "powershell",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "send_file",
+        "view_image",
+    }
+    assert str(agent_settings.agent_workdir) in first["messages"][0]["content"]
+    tool_message = second["messages"][-1]
+    assert tool_message["role"] == "tool" and tool_message["tool_call_id"] == "call_0"
+    assert "exit_code=0" in tool_message["content"] and "中文ok" in tool_message["content"]
+    # Reasoning goes back within the turn, but is never persisted.
+    assert second["messages"][-2]["reasoning_content"] == "想一想"
+    history = await store.load(CHANNEL)
+    assert [m["role"] for m in history] == ["user", "assistant", "tool", "assistant"]
+    assert all("reasoning_content" not in m for m in history)
+    assert agent.usage[CHANNEL] == {"calls": 2, "prompt": 20, "cached": 0, "completion": 10}
+
+
+async def test_history_carries_into_next_message(make_agent):
+    provider = Provider(completion("第一次", reasoning="r1"), completion("第二次"))
+    agent = await make_agent(provider)
+    chat = Chat()
+    await say(agent, chat, "一")
+    await say(agent, chat, "二")
+    messages = provider.bodies[1]["messages"]
+    assert [m["role"] for m in messages] == ["system", "user", "assistant", "user"]
+    assert messages[2]["content"] == "第一次" and "reasoning_content" not in messages[2]
+    assert messages[3]["content"].endswith("] 二")
+
+
+async def test_new_starts_fresh_conversation_but_keeps_rows(make_agent, store):
+    provider = Provider(completion("嗯"))
+    agent = await make_agent(provider)
+    chat = Chat()
+    await say(agent, chat, "记住这个")
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!new", chat=chat)
+    assert await store.load(CHANNEL) == []
+    count = await (await store.db.execute("SELECT COUNT(*) FROM agent_messages")).fetchone()
+    assert count[0] == 2
+
+
+async def test_stop_kills_running_command_and_keeps_history_valid(make_agent, store):
+    provider = Provider(
+        completion("", [("powershell", {"command": "Start-Sleep -Seconds 60"})]),
+        completion("继续了"),
+    )
+    agent = await make_agent(provider)
+    chat = Chat()
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="睡一会", chat=chat)
+    for _ in range(200):
+        if any("powershell" in text for text in chat.sent):
+            break
+        await asyncio.sleep(0.05)
+    await asyncio.sleep(0.5)
+    started = asyncio.get_running_loop().time()
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!stop", chat=chat)
+    assert asyncio.get_running_loop().time() - started < 15
+    assert chat.sent[-1] == "停下了"
+    history = await store.load(CHANNEL)
+    assert history[-1] == {"role": "tool", "tool_call_id": "call_0", "content": STOPPED_RESULT}
+    await say(agent, chat, "接着来")
+    assert provider.bodies[-1]["messages"][-1]["content"].endswith("] 接着来")
+
+
+async def test_message_during_a_turn_is_injected_after_tool_step(make_agent):
+    release = asyncio.Event()
+    provider = Provider(
+        completion("", [("powershell", {"command": "Write-Output a"})]),
+        completion("收到新要求"),
+    )
+    agent = await make_agent(provider)
+    original = agent.tools.powershell
+
+    async def slow(*args):
+        await release.wait()
+        return await original(*args)
+
+    agent.tools.powershell = slow
+    chat = Chat()
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="先做A", chat=chat)
+    await asyncio.sleep(0.2)
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="改成B", chat=chat)
+    release.set()
+    await asyncio.wait_for(agent.workers[CHANNEL], 30)
+    roles = [m["role"] for m in provider.bodies[1]["messages"]]
+    assert roles == ["system", "user", "assistant", "tool", "user"]
+    assert provider.bodies[1]["messages"][-1]["content"].endswith("] 改成B")
+
+
+async def test_step_limit_pauses_runaway_loops(make_agent):
+    call = completion("", [("read_file", {"path": "missing.txt"})])
+    provider = Provider(call, call, call)
+    agent = await make_agent(provider, agent_max_steps=2)
+    chat = Chat()
+    await say(agent, chat, "go")
+    assert len(provider.bodies) == 2 and "先停一下" in chat.sent[-1]
+
+
+async def test_provider_error_is_reported_without_crashing(make_agent):
+    agent = await make_agent(Provider(500))
+    chat = Chat()
+    await say(agent, chat, "hi")
+    assert chat.sent == ["DeepSeek 请求失败（HTTP 500），先停下"]
+    assert CHANNEL not in agent.workers
+
+
+async def test_send_file_and_tool_errors_are_returned_to_model(make_agent, agent_settings):
+    (agent_settings.agent_workdir / "shot.txt").write_text("x")
+    provider = Provider(
+        completion("", [("send_file", {"path": "shot.txt"}), ("read_file", {"path": "nope"})]),
+        completion("发了"),
+    )
+    agent = await make_agent(provider)
+    chat = Chat()
+    await say(agent, chat, "发我")
+    assert chat.files == [agent_settings.agent_workdir / "shot.txt"]
+    results = [m["content"] for m in provider.bodies[1]["messages"] if m["role"] == "tool"]
+    assert results[0] == "已发送 shot.txt" and results[1].startswith("错误：文件不存在")
+
+
+async def test_outgoing_text_redacts_configured_secrets(make_agent):
+    agent = await make_agent(Provider(completion("key is test-deepseek-key")))
+    chat = Chat()
+    await say(agent, chat, "?")
+    assert chat.sent == ["key is [REDACTED]"]
+
+
+def test_file_tools_read_write_edit_relative_to_workdir(tmp_path):
+    tools = HostTools(tmp_path)
+    assert "已写入" in tools.write_file("sub/a.txt", "one\ntwo\ntwo\n")
+    assert (tmp_path / "sub/a.txt").read_text() == "one\ntwo\ntwo\n"
+    assert tools.read_file("sub/a.txt") == "1\tone\n2\ttwo\n3\ttwo"
+    assert tools.read_file("sub/a.txt", offset=2, limit=1).startswith("2\ttwo\n[还有 1 行")
+    with pytest.raises(ToolError, match="2 处"):
+        tools.edit_file("sub/a.txt", "two", "2")
+    tools.edit_file("sub/a.txt", "two", "2", replace_all=True)
+    assert (tmp_path / "sub/a.txt").read_text() == "one\n2\n2\n"
+    with pytest.raises(ToolError, match="没有找到"):
+        tools.edit_file("sub/a.txt", "zzz", "y")
+
+
+def test_edit_preserves_crlf_files(tmp_path):
+    path = tmp_path / "win.txt"
+    path.write_bytes(b"a\r\nb\r\nc\r\n")
+    HostTools(tmp_path).edit_file(str(path), "a\nb", "a\nB")
+    assert path.read_bytes() == b"a\r\nB\r\nc\r\n"
+
+
+async def test_powershell_timeout_and_cwd(tmp_path):
+    tools = HostTools(tmp_path)
+    (tmp_path / "inner").mkdir()
+    output = await tools.powershell("(Get-Location).Path", "inner")
+    assert output.endswith(str(tmp_path / "inner"))
+    assert "超时" in await tools.powershell("Start-Sleep -Seconds 30", None, 1)
+    with pytest.raises(ToolError):
+        await tools.powershell("dir", "missing-dir")
+    await tools.close()
+
+
+def test_describe_call_is_single_line_and_bounded():
+    text = describe_call("powershell", {"command": "a\n`b`\n" + "x" * 300})
+    assert "\n" not in text and "`b`" not in text and len(text) < 200
+
+
+def test_fit_drops_oldest_turns_and_starts_with_user():
+    history = [
+        {"role": "user", "content": "x" * 100},
+        {"role": "assistant", "content": "y" * 100},
+        {"role": "user", "content": "new"},
+        {"role": "assistant", "content": "ok"},
+    ]
+    assert fit(history, 10_000) == history
+    assert fit(history, 100) == history[2:]
+    assert fit([{"role": "tool", "content": ""}, *history], 10_000) == history
+
+
+def test_request_messages_strip_reasoning_from_earlier_turns():
+    history = [
+        {"role": "user", "content": "a"},
+        {"role": "assistant", "content": "b", "reasoning_content": "old"},
+        {"role": "user", "content": "c"},
+        {"role": "assistant", "content": "", "reasoning_content": "new"},
+    ]
+    result = request_messages(history)
+    assert "reasoning_content" not in result[1] and result[3]["reasoning_content"] == "new"
+
+
+def test_agent_settings_from_env(tmp_path):
+    base = {
+        "DISCORD_BOT_TOKEN": "token",
+        "DEEPSEEK_API_KEY": "key",
+        "ALLOWED_CHANNEL_IDS": "100",
+        "PERSONAL_MODE_ENABLED": "true",
+        "OWNER_DISCORD_USER_ID": "20",
+        "AGENT_WORKDIR": str(tmp_path),
+    }
+    settings = Settings.from_env(
+        {**base, "AGENT_MODEL": "deepseek-pro", "AGENT_THINKING": "false", "AGENT_MAX_STEPS": "5"}
+    )
+    assert settings.agent_workdir == tmp_path and settings.agent_model == "deepseek-pro"
+    assert not settings.agent_thinking and settings.agent_max_steps == 5
+    with pytest.raises(ConfigurationError, match="AGENT_WORKDIR"):
+        Settings.from_env({**base, "AGENT_WORKDIR": str(tmp_path / "missing")})
+    with pytest.raises(ConfigurationError, match="AGENT_REASONING_EFFORT"):
+        Settings.from_env({**base, "AGENT_REASONING_EFFORT": "huge"})
+
+
+async def test_discord_routes_owner_dm_with_attachment_links(agent_settings, storage, policy):
+    bot = DiscordAgent(agent_settings, AgentService(storage, policy))
+    bot._connection.user = SimpleNamespace(id=999)
+    bot.personal = SimpleNamespace(handle_dm=AsyncMock(return_value=True))
+    channel = MagicMock(spec=discord.DMChannel)
+    channel.id = CHANNEL
+    message = SimpleNamespace(
+        guild=None,
+        channel=channel,
+        author=SimpleNamespace(id=OWNER, bot=False),
+        content="看看这个",
+        attachments=[SimpleNamespace(filename="a.png", url="https://cdn.example/a.png")],
+        webhook_id=None,
+    )
+    await bot.on_message(message)
+    call = bot.personal.handle_dm.await_args.kwargs
+    assert call["owner_id"] == OWNER and call["channel_id"] == CHANNEL
+    assert call["content"] == "看看这个\n[附件 a.png: https://cdn.example/a.png]"
+    assert call["chat"].channel is channel
+
+
+async def test_shell_keeps_location_variables_and_functions(tmp_path):
+    (tmp_path / "sub").mkdir()
+    tools = HostTools(tmp_path)
+    try:
+        await tools.powershell("$x = 7; function hi { 'hello' }; Set-Location sub")
+        output = await tools.powershell("$x; hi; (Get-Location).Path")
+        assert output.splitlines() == ["exit_code=0", "7", "hello", str(tmp_path / "sub")]
+        # cwd applies to one call only.
+        once = await tools.powershell("(Get-Location).Path", str(tmp_path))
+        assert once.endswith(str(tmp_path))
+        assert (await tools.powershell("(Get-Location).Path")).endswith(str(tmp_path / "sub"))
+        assert await tools.powershell("cmd /c exit 4") == "exit_code=4"
+        assert "Exception: boom" in await tools.powershell("throw 'boom'")
+        await tools.reset_shell()
+        assert await tools.powershell("$x") == "exit_code=0"
+        assert "shell 已退出" in await tools.powershell("exit 3")
+        assert await tools.powershell("Write-Output '中文'") == "exit_code=0\n中文"
+    finally:
+        await tools.close()
+
+
+async def test_new_conversation_resets_shell(make_agent):
+    agent = await make_agent(Provider())
+    await agent.tools.powershell("$keep = 1")
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!new", chat=Chat())
+    assert agent.tools.process is None
+    assert await agent.tools.powershell("$keep") == "exit_code=0"
+
+
+async def test_system_prompt_is_constant_and_messages_carry_time(make_agent):
+    provider = Provider(completion("一"), completion("二"))
+    agent = await make_agent(provider)
+    chat = Chat()
+    await say(agent, chat, "a")
+    await say(agent, chat, "b")
+    first, second = (body["messages"] for body in provider.bodies)
+    assert first[0] == second[0]
+    assert second[1]["content"].startswith("[20") and second[1]["content"].endswith("] a")
+
+
+def chunk(delta=None, usage=None):
+    return {
+        "id": "chatcmpl-test",
+        "object": "chat.completion.chunk",
+        "created": 1,
+        "model": "deepseek-flash",
+        "choices": [] if usage else [{"index": 0, "delta": delta or {}, "finish_reason": None}],
+        **({"usage": usage} if usage else {}),
+    }
+
+
+def sse_response(*chunks):
+    body = b"".join(
+        b"data: " + json.dumps(c, ensure_ascii=False).encode() + b"\n\n" for c in chunks
+    )
+    return httpx2.Response(
+        200, headers={"content-type": "text/event-stream"}, content=body + b"data: [DONE]\n\n"
+    )
+
+
+class Sink:
+    def __init__(self):
+        self.events = []
+
+    def offer(self, event):
+        self.events.append(event)
+
+
+class Observer:
+    def __init__(self):
+        self.sink = Sink()
+
+    def publisher(self, source, *, session_id=None, task_id=None):
+        return Publisher(self.sink, source, session_id=session_id, task_id=task_id)
+
+
+def tool_delta(**fields):
+    return {"tool_calls": [{"index": 0, **fields}]}
+
+
+async def test_monitor_streams_thinking_text_and_tools(make_agent):
+    usage = {"prompt_tokens": 10, "completion_tokens": 5, "prompt_cache_hit_tokens": 8}
+    first_part = {"name": "read_file", "arguments": '{"pa'}
+    responses = [
+        sse_response(
+            chunk({"reasoning_content": "先看"}),
+            chunk({"reasoning_content": "文件"}),
+            chunk(tool_delta(id="call_0", type="function", function=first_part)),
+            chunk(tool_delta(function={"arguments": 'th": "x"}'})),
+            chunk(usage=usage),
+        ),
+        sse_response(
+            chunk({"content": "没有"}), chunk({"content": "这个文件"}), chunk(usage=usage)
+        ),
+    ]
+    bodies = []
+
+    async def provider(request):
+        bodies.append(json.loads(request.content))
+        return responses.pop(0)
+
+    agent = await make_agent(provider)
+    agent.observer = Observer()
+    chat = Chat()
+    await say(agent, chat, "看看 x")
+    assert chat.sent[-1] == "没有这个文件"
+    assert bodies[0]["stream"] is True
+    assistant = bodies[1]["messages"][-2]
+    call = assistant["tool_calls"][0]["function"]
+    assert call == {"name": "read_file", "arguments": '{"path": "x"}'}
+    assert assistant["reasoning_content"] == "先看文件"
+    events = agent.observer.sink.events
+
+    def joined(kind):
+        return "".join(e["data"].get("text", "") for e in events if e["type"] == kind)
+
+    assert joined("reasoning-delta") == "先看文件" and joined("text-delta") == "没有这个文件"
+    kinds = {e["type"] for e in events}
+    assert {"tool-call", "tool-result", "task-status", "model-status"} <= kinds
+    assert all(e["source"] == "personal" and e["session_id"] == str(CHANNEL) for e in events)
+    assert agent.usage[CHANNEL]["cached"] == 16
+
+
+async def test_think_toggle_folds_reasoning_into_dm(make_agent):
+    provider = Provider(completion("好", reasoning="a||b" + "x" * 3000))
+    agent = await make_agent(provider)
+    chat = Chat()
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!think", chat=chat)
+    await say(agent, chat, "?")
+    preview = chat.sent[1]
+    assert preview.startswith("-# 💭 思考过程\n||a| |b") and preview.endswith("monitor）||")
+    assert len(preview) < 1900 and chat.sent[2] == "好"
+
+
+async def test_restart_command_requires_supervisor(make_agent):
+    agent = await make_agent(Provider())
+    chat = Chat()
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!restart", chat=chat)
+    assert "守护进程" in chat.sent[-1]
+    agent.restarter = AsyncMock()
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!restart", chat=chat)
+    agent.restarter.assert_awaited_once_with(CHANNEL)
+
+
+async def test_restart_tool_finishes_step_then_restarts(make_agent, store):
+    provider = Provider(completion("改好了", [("restart_bot", {})]), completion("不该到这里"))
+    agent = await make_agent(provider)
+    agent.restarter = AsyncMock()
+    await say(agent, Chat(), "改完重启")
+    await agent.restart_task
+    agent.restarter.assert_awaited_once_with(CHANNEL)
+    assert len(provider.bodies) == 1
+    assert "restart_bot" in {t["function"]["name"] for t in provider.bodies[0]["tools"]}
+    history = await store.load(CHANNEL)
+    assert history[-1]["role"] == "tool" and "重启" in history[-1]["content"]
+
+
+async def test_restart_tool_hidden_without_supervisor(make_agent):
+    provider = Provider(completion("好"))
+    agent = await make_agent(provider)
+    await say(agent, Chat(), "hi")
+    assert "restart_bot" not in {t["function"]["name"] for t in provider.bodies[0]["tools"]}
+    assert "restart_bot" not in provider.bodies[0]["messages"][0]["content"]
+
+
+async def test_bot_restart_marker_round_trip(agent_settings, storage, policy):
+    bot = DiscordAgent(agent_settings, AgentService(storage, policy))
+    bot.close = AsyncMock()
+    await bot.request_restart(CHANNEL)
+    assert bot.restart_requested and bot.close.await_count == 1
+    sent = AsyncMock()
+    bot.get_partial_messageable = MagicMock(return_value=SimpleNamespace(send=sent))
+    await bot._announce_restart()
+    bot.get_partial_messageable.assert_called_once_with(CHANNEL)
+    assert "重启好了" in sent.await_args.args[0] and not bot.restart_marker.exists()
+    await bot._announce_restart()
+    assert sent.await_count == 1
+
+
+def test_supervisor_single_instance_lock(tmp_path, monkeypatch):
+    from discord_dfy import supervisor
+
+    monkeypatch.chdir(tmp_path)
+    first = supervisor.single_instance()
+    assert first is not None and supervisor.single_instance() is None
+    first.close()
+    assert supervisor.single_instance() is not None
+
+
+def test_supervisor_waits_and_takes_over(tmp_path, monkeypatch):
+    from discord_dfy import supervisor
+
+    monkeypatch.chdir(tmp_path)
+    holder = supervisor.single_instance()
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 3:
+            holder.close()  # The other supervisor dies.
+
+    lock = supervisor.wait_for_lock(sleep=sleep, interval=7)
+    assert lock is not None and sleeps == [7, 7, 7]
+    assert "waiting to take over" in next((tmp_path / "data/logs").iterdir()).read_text("utf-8")
+    lock.close()
+
+
+async def test_memory_is_loaded_once_per_conversation(make_agent, agent_settings):
+    provider = Provider(completion("好"), completion("嗯"), completion("在"))
+    agent = await make_agent(provider)
+    chat = Chat()
+    await say(agent, chat, "a")
+    assert "<memory>\n（还是空的）\n</memory>" in provider.bodies[0]["messages"][0]["content"]
+    assert str(agent_settings.agent_memory_path) in provider.bodies[0]["messages"][0]["content"]
+    agent_settings.agent_memory_path.write_text("- 老爹喜欢简短回复\n", encoding="utf-8")
+    await say(agent, chat, "b")
+    # Unchanged within the conversation, so the cached prefix stays valid.
+    assert provider.bodies[1]["messages"][0] == provider.bodies[0]["messages"][0]
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!new", chat=chat)
+    await say(agent, chat, "c")
+    assert "<memory>\n- 老爹喜欢简短回复\n</memory>" in provider.bodies[2]["messages"][0]["content"]
+    assert "<group_memory>" not in provider.bodies[2]["messages"][0]["content"]
+
+
+def test_memory_block_truncates_long_notes():
+    block = host_agent.memory_block("x" * 20000)
+    assert len(block) < 12200 and "请整理精简" in block
+
+
+async def test_memory_command_shows_or_attaches_notes(make_agent, agent_settings):
+    agent = await make_agent(Provider())
+    chat = Chat()
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!memory", chat=chat)
+    assert chat.sent[-1].startswith("还没有记下什么")
+    agent_settings.agent_memory_path.write_text("- 项目在 D:\\Dev", encoding="utf-8")
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!memory", chat=chat)
+    assert chat.sent[-1].endswith("- 项目在 D:\\Dev")
+    agent_settings.agent_memory_path.write_text("y" * 3000, encoding="utf-8")
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!memory", chat=chat)
+    assert chat.files == [agent_settings.agent_memory_path]
+
+
+def test_split_for_compaction_never_keeps_a_leading_tool_result():
+    history = [
+        {"role": "user", "content": "a" * 100},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "1"}]},
+        {"role": "tool", "tool_call_id": "1", "content": "b" * 100},
+        {"role": "assistant", "content": "c"},
+    ]
+    old, recent = split_for_compaction(history, 160)
+    assert recent[0]["role"] == "assistant" and old + recent == history
+    old, recent = split_for_compaction(history, 0)
+    assert old == history and recent == []
+    old, recent = split_for_compaction(history, 10_000)
+    assert old == [] and recent == history
+
+
+def test_transcript_labels_speakers_tools_and_prior_summary():
+    text = transcript(
+        [
+            {"role": "user", "content": SUMMARY_PREFIX + "旧摘要"},
+            {"role": "user", "content": "做A"},
+            {
+                "role": "assistant",
+                "content": "好",
+                "tool_calls": [
+                    {"function": {"name": "powershell", "arguments": '{"command":"ls"}'}}
+                ],
+            },
+            {"role": "tool", "content": "z" * 5000},
+        ]
+    )
+    assert text.startswith("【之前的摘要】旧摘要\n\n【老爹】做A\n\n【小鲸鱼】好")
+    assert '【小鲸鱼调用 powershell】{"command":"ls"}' in text
+    assert "【工具结果】" in text and "省略" in text
+
+
+async def seed(store, count):
+    await store.append(
+        CHANNEL,
+        [
+            message
+            for index in range(count)
+            for message in (
+                {"role": "user", "content": f"问题{index} " + "x" * 200},
+                {"role": "assistant", "content": f"回答{index}"},
+            )
+        ],
+    )
+
+
+async def test_auto_compaction_summarizes_older_turns(make_agent, store, monkeypatch):
+    monkeypatch.setattr(host_agent, "KEEP_RECENT_CHARS", 300)
+    await seed(store, 5)
+    provider = Provider(completion("摘要：问过五个问题"), completion("继续"))
+    agent = await make_agent(provider, agent_compact_tokens=100)
+    chat = Chat()
+    await say(agent, chat, "接着说")
+    summarizer, main = provider.bodies
+    assert "tools" not in summarizer and summarizer["thinking"] == {"type": "disabled"}
+    assert summarizer["messages"][0]["content"] == COMPACT_PROMPT
+    assert "【老爹】问题0" in summarizer["messages"][1]["content"]
+    first = main["messages"][1]
+    assert first["role"] == "user" and first["content"] == SUMMARY_PREFIX + "摘要：问过五个问题"
+    assert main["messages"][-1]["content"].endswith("] 接着说")
+    assert len(main["messages"]) < 8
+    history = await store.load(CHANNEL)
+    assert history[0] == first and history[-1] == {"role": "assistant", "content": "继续"}
+    rows = await (await store.db.execute("SELECT COUNT(*) FROM agent_messages")).fetchone()
+    assert rows[0] > len(history)  # The original messages are still in the database.
+    assert any("压缩好了" in text for text in chat.sent)
+    assert agent.usage[CHANNEL]["calls"] == 2
+
+
+async def test_failed_compaction_backs_off_and_continues(make_agent, store, monkeypatch):
+    monkeypatch.setattr(host_agent, "KEEP_RECENT_CHARS", 300)
+    await seed(store, 5)
+    provider = Provider(500, completion("照常回答"))
+    agent = await make_agent(provider, agent_compact_tokens=100)
+    chat = Chat()
+    await say(agent, chat, "hi")
+    assert chat.sent[-1] == "照常回答" and any("压缩失败" in text for text in chat.sent)
+    assert agent.compact_backoff[CHANNEL] > 100
+    assert not agent._should_compact(CHANNEL, await store.load(CHANNEL))
+
+
+async def test_manual_compact_when_idle(make_agent, store):
+    agent = await make_agent(Provider(completion("全部摘要")))
+    chat = Chat()
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!compact", chat=chat)
+    assert chat.sent[-1] == "现在没有可以压缩的内容"
+    await seed(store, 2)
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!compact", chat=chat)
+    assert await store.load(CHANNEL) == [{"role": "user", "content": SUMMARY_PREFIX + "全部摘要"}]
+
+
+async def test_status_reports_context_and_memory(make_agent, store, agent_settings):
+    agent_settings.agent_memory_path.write_text("abc", encoding="utf-8")
+    agent = await make_agent(Provider())
+    await seed(store, 1)
+    chat = Chat()
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!status", chat=chat)
+    assert "条消息，约" in chat.sent[-1] and "长期记忆 3 字" in chat.sent[-1]
+
+
+class FakeGroup:
+    def __init__(self):
+        self.calls = []
+
+    def set_enabled(self, value):
+        self.calls.append(("enabled", value))
+
+    def set_level(self, value):
+        self.calls.append(("level", value))
+
+    def quiet(self, seconds):
+        self.calls.append(("quiet", seconds))
+
+    def status(self):
+        return "群聊状态"
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("!group", []),
+        ("!group on", [("enabled", True)]),
+        ("!GROUP OFF", [("enabled", False)]),
+        ("!group level 3", [("level", 3)]),
+        ("!quiet", [("quiet", 1800)]),
+        ("!quiet 45m", [("quiet", 2700)]),
+        ("!quiet 2h", [("quiet", 7200)]),
+        ("!quiet 3小时", [("quiet", 10800)]),
+        ("!quiet off", [("quiet", 0)]),
+    ],
+)
+async def test_group_commands_from_dm(make_agent, text, expected):
+    provider = Provider()
+    agent = await make_agent(provider)
+    agent.group = FakeGroup()
+    chat = Chat()
+    assert await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content=text, chat=chat)
+    assert agent.group.calls == expected and "群聊状态" in chat.sent[-1]
+    assert provider.bodies == [] and not agent.workers
+
+
+@pytest.mark.parametrize("text", ["!group level 9", "!group dance", "!quiet soon"])
+async def test_bad_group_commands_show_usage(make_agent, text):
+    agent = await make_agent(Provider())
+    agent.group = FakeGroup()
+    chat = Chat()
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content=text, chat=chat)
+    assert agent.group.calls == [] and "用法" in chat.sent[-1]
+
+
+async def test_commands_with_unexpected_arguments_show_help(make_agent):
+    agent = await make_agent(Provider())
+    chat = Chat()
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!new please", chat=chat)
+    assert "!group" in chat.sent[-1] and not agent.workers
+
+
+class GroupTransport:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, channel_id, text, reply_to):
+        self.sent.append((channel_id, text))
+        return 555
+
+    def channels(self):
+        return [{"id": 100, "channel": "闲聊", "guild_id": 10, "guild": "朋友群"}]
+
+
+async def test_owner_can_have_the_bot_speak_in_the_group(make_agent, agent_settings):
+    from discord_dfy.group_chat import GroupChat
+
+    provider = Provider(
+        completion("", [("group_post", {"text": "老爹说今晚不来了"})]),
+        completion("说好了"),
+    )
+    agent = await make_agent(provider)
+    transport = GroupTransport()
+    agent.group = GroupChat(agent_settings, agent.client, transport)
+    agent_settings.agent_memory_path.write_text(
+        "# memory\n\n## 群里的人和事\n- 阿明不吃香菜（10-22）\n", encoding="utf-8"
+    )
+    chat = Chat()
+    await say(agent, chat, "去群里说一声我今晚不来")
+    assert transport.sent == [(100, "老爹说今晚不来了")]
+    first, second = provider.bodies
+    assert "group_post" in {tool["function"]["name"] for tool in first["tools"]}
+    system = first["messages"][0]["content"]
+    assert "<memory>\n# memory\n\n## 群里的人和事\n- 阿明不吃香菜" in system
+    assert "只有一个你" in system and "群里的我" in system
+    assert "你在群里的时候私信了老爹" in system  # Knows it may DM the owner from the group.
+    assert second["messages"][-1]["content"] == "已发到 朋友群 #闲聊"
+    assert "`group_post`" in chat.sent[0] and chat.sent[-1] == "说好了"
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!groupmemory", chat=chat)
+    assert "群里的人和事" in chat.sent[-1] and chat.sent[-1].endswith("- 阿明不吃香菜（10-22）")
+    await agent.group.close()
+
+
+async def test_dm_side_hears_what_happened_in_the_group(make_agent, agent_settings):
+    from discord_dfy.group_chat import ChatLine, GroupChat
+
+    provider = Provider(completion("看到了"), completion("嗯"))
+    agent = await make_agent(provider)
+    agent.group = GroupChat(agent_settings, agent.client, GroupTransport())
+    window = agent.group._window(100, ("朋友群", "#闲聊"), 10)
+    now = agent.group_seen + timedelta(microseconds=1)  # Clocks can tick coarsely.
+    agent.group._append(window, ChatLine(1, 30, "阿明", "周六爬山去不去", now))
+    agent.group._append(window, ChatLine(2, 0, "小鲸鱼", "去！", now, is_self=True))
+    chat = Chat()
+    await say(agent, chat, "群里在聊啥")
+    user = provider.bodies[0]["messages"][-1]["content"]
+    assert user.startswith("[宿主记录] 上次私聊之后群里的动静：\n#闲聊 ")
+    assert "阿明：周六爬山去不去" in user and "你：去！" in user and user.endswith("群里在聊啥")
+    await say(agent, chat, "好")
+    assert "群里的动静" not in provider.bodies[1]["messages"][-1]["content"]  # Caught up.
+    await agent.group.close()
+
+
+async def test_group_memory_command_without_notes(make_agent):
+    agent = await make_agent(Provider())
+    chat = Chat()
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!groupmemory", chat=chat)
+    assert chat.sent == ["群里的事还没记下什么"]
+
+
+def test_memory_notes_go_under_their_sections_without_duplicates(tmp_path):
+    from discord_dfy.memory import add_memory_notes, without_section
+
+    path = tmp_path / "memory.md"
+    path.write_text(
+        "# memory\n\n## 老爹\n- 说话直接（2026-10-01）\n\n## 做事备忘\n- 用 uv\n", encoding="utf-8"
+    )
+    added = add_memory_notes(
+        path,
+        {"老爹": ["说话直接", "最近想换工作（10-23）"], "我们之间": ["一起吐槽了改三遍的需求"]},
+    )
+    text = path.read_text(encoding="utf-8")
+    assert added == 2
+    lines = text.splitlines()
+    assert lines[3] == "- 说话直接（2026-10-01）" and lines[4].startswith("- 最近想换工作（20")
+    # New sections go before the work notes, which stay last.
+    assert lines[5:7] == ["", "## 我们之间"] and "改三遍" in lines[7]
+    assert lines[-2:] == ["## 做事备忘", "- 用 uv"]
+    public = without_section(text, "做事备忘")
+    assert "做事备忘" not in public and "用 uv" not in public and "改三遍" in public
+    assert add_memory_notes(tmp_path / "new.md", {"我自己": ["喜欢下雨天"]}) == 1
+    assert (tmp_path / "new.md").read_text(encoding="utf-8").startswith("# memory\n\n## 我自己\n")
+
+
+async def test_quiet_chat_is_looked_back_over_once(make_agent, agent_settings):
+    notes = {"老爹": [], "我们之间": ["老爹加班到九点，想换工作"], "我自己": []}
+    provider = Provider(
+        completion("辛苦啦"),
+        completion(json.dumps(notes, ensure_ascii=False)),
+        completion("晚安"),
+        completion("{}"),
+    )
+    agent = await make_agent(provider, agent_reflect_seconds=0.05)
+    chat = Chat()
+    await say(agent, chat, "今天加班到九点")
+    await asyncio.wait_for(agent.reflect_timers[CHANNEL], 5)
+    reflect = provider.bodies[1]
+    assert reflect["messages"][0]["content"] == host_agent.REFLECT_PROMPT
+    assert reflect["response_format"] == {"type": "json_object"}
+    looked_at = reflect["messages"][1]["content"]
+    assert "【老爹】[" in looked_at and "【我】辛苦啦" in looked_at
+    memory = agent_settings.agent_memory_path.read_text(encoding="utf-8")
+    assert "## 我们之间\n- 老爹加班到九点，想换工作（" in memory
+    await say(agent, chat, "睡了")
+    agent._cancel_reflect(CHANNEL)
+    await agent._reflect(CHANNEL, await agent.store.load(CHANNEL))
+    # Only what came after the last look is sent again.
+    assert "加班" not in provider.bodies[3]["messages"][1]["content"].split("<chat>")[1]
+    await agent._reflect(CHANNEL, await agent.store.load(CHANNEL))
+    assert len(provider.bodies) == 4
+
+
+async def test_group_side_dm_rides_along_with_the_owners_next_message(
+    make_agent, store, agent_settings
+):
+    provider = Provider(completion("嗯嗯"), completion("在"))
+    agent = await make_agent(provider)
+    await agent.note_outgoing(CHANNEL, "悄悄话")
+    # Survives a restart until the owner answers.
+    agent = await make_agent(provider)
+    chat = Chat()
+    await say(agent, chat, "你刚才说啥")
+    user = provider.bodies[0]["messages"][-1]["content"]
+    assert user.startswith("[宿主记录] ") and "你在群里的时候私信了老爹" in user
+    assert "\n悄悄话\n\n[" in user and user.endswith("你刚才说啥")
+    await say(agent, chat, "好")
+    assert "宿主记录" not in provider.bodies[1]["messages"][-1]["content"]
+    outbox = agent_settings.personal_database_path.parent / "dm_outbox.json"
+    assert not agent.outgoing and outbox.read_text(encoding="utf-8") == "{}"
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 20
+
+
+async def test_owner_images_are_shown_and_kept_as_file_references(make_agent, store, tmp_path):
+    image = tmp_path / "cat.png"
+    image.write_bytes(PNG)
+    provider = Provider(completion("好可爱"), completion("嗯"))
+    agent = await make_agent(provider)
+    chat = Chat()
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="", chat=chat, images=[image])
+    await asyncio.wait_for(agent.workers[CHANNEL], 30)
+    content = provider.bodies[0]["messages"][-1]["content"]
+    assert content[0]["type"] == "text" and content[0]["text"].endswith("（发了图片）")
+    assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+    stored = (await store.load(CHANNEL))[0]["content"]
+    assert stored[1] == {"type": "image_file", "path": str(image)}
+    await say(agent, chat, "还有吗")
+    # Still shown on later requests (same bytes, so the prefix stays cached).
+    assert provider.bodies[1]["messages"][1]["content"][1] == content[1]
+
+
+async def test_view_image_shows_a_copy_after_the_tool_result(make_agent, agent_settings, store):
+    shot = agent_settings.agent_workdir / "shot.png"
+    shot.write_bytes(PNG)
+    provider = Provider(
+        completion("", [("view_image", {"path": "shot.png"})]),
+        completion("屏幕上是个白框"),
+    )
+    agent = await make_agent(provider)
+    await say(agent, Chat(), "截个图看看")
+    shot.write_bytes(b"overwritten")
+    roles = [m["role"] for m in provider.bodies[1]["messages"][1:]]
+    assert roles == ["user", "assistant", "tool", "user"]
+    shown = provider.bodies[1]["messages"][-1]["content"]
+    assert "shot.png" in shown[0]["text"] and shown[1]["type"] == "image_url"
+    history = await store.load(CHANNEL)
+    copy = history[3]["content"][1]["path"]
+    assert copy != str(shot) and Path(copy).read_bytes() == PNG  # noqa: ASYNC240
+
+
+async def test_view_image_rejects_non_images(make_agent, agent_settings):
+    (agent_settings.agent_workdir / "a.txt").write_text("hi", encoding="utf-8")
+    provider = Provider(completion("", [("view_image", {"path": "a.txt"})]), completion("哦"))
+    agent = await make_agent(provider)
+    await say(agent, Chat(), "看看")
+    assert "不是 PNG" in provider.bodies[1]["messages"][-1]["content"]
+
+
+class FakeWeb:
+    async def search(self, query, count):
+        return [{"title": "结果", "url": "https://r.example", "summary": f"关于{query}"}]
+
+    async def fetch(self, url):
+        return {"title": "页面", "content": "正文内容"}
+
+
+async def test_web_tools_are_offered_and_run(make_agent):
+    provider = Provider(
+        completion(
+            "", [("web_search", {"query": "新闻"}), ("web_fetch", {"url": "https://r.example"})]
+        ),
+        completion("看完了"),
+    )
+    agent = await make_agent(provider)
+    agent.web = FakeWeb()
+    await say(agent, Chat(), "今天有啥新闻")
+    first, second = provider.bodies
+    names = {tool["function"]["name"] for tool in first["tools"]}
+    assert {"web_search", "web_fetch"} <= names
+    assert "web_search（上网搜索）" in first["messages"][0]["content"]
+    results = [m["content"] for m in second["messages"] if m["role"] == "tool"]
+    assert results[0].startswith("[1] 结果\nhttps://r.example") and "关于新闻" in results[0]
+    assert results[1].startswith("# 页面\nhttps://r.example\n\n正文内容")
+
+
+# ---- reaching out first ----
+
+HOUR = 3600
+
+
+def test_quiet_hours_may_wrap_midnight():
+    at = lambda h, m=0: datetime(2026, 10, 22, h, m)  # noqa: E731
+    assert in_quiet_hours("03:00-11:00", at(5)) and not in_quiet_hours("03:00-11:00", at(11))
+    assert in_quiet_hours("23:30-07:00", at(23, 45)) and in_quiet_hours("23:30-07:00", at(2))
+    assert not in_quiet_hours("23:30-07:00", at(12)) and not in_quiet_hours("", at(5))
+    assert parse_quiet_hours("3:00 - 11:30") == (180, 690) and parse_quiet_hours("9am") is None
+    with pytest.raises(ConfigurationError, match="AGENT_QUIET_HOURS"):
+        Settings.from_env(
+            {
+                "DISCORD_BOT_TOKEN": "t",
+                "DEEPSEEK_API_KEY": "k",
+                "ALLOWED_CHANNEL_IDS": "100",
+                "AGENT_QUIET_HOURS": "late",
+            }
+        )
+    assert ago(90) == "1 分钟" and ago(5 * HOUR) == "5 小时" and ago(72 * HOUR) == "3 天"
+
+
+class Clock:
+    def __init__(self):
+        self.t = time.time()
+
+    def __call__(self):
+        return self.t
+
+
+async def setup(make_agent, provider, **overrides):
+    agent = await make_agent(provider, agent_initiative=True, agent_quiet_hours="", **overrides)
+    sent = []
+    clock = Clock()
+
+    async def reach(text):
+        sent.append(text)
+        await agent.note_outgoing(CHANNEL, text, "self")
+
+    initiative = Initiative(agent, reach, clock=clock, now=lambda: datetime(2026, 10, 22, 20))
+    agent.initiative = initiative
+    return agent, initiative, clock, sent
+
+
+async def test_reaches_out_after_a_quiet_spell_once_until_answered(make_agent, monkeypatch):
+    provider = Provider(
+        completion("晚安"),
+        completion(json.dumps({"message": "爬山那天下雨了吗"}, ensure_ascii=False)),
+        completion("没下就好"),
+    )
+    agent, initiative, clock, sent = await setup(make_agent, provider)
+    await say(agent, Chat(), "周末去爬山")
+    assert not await initiative.consider()  # Just talked.
+    clock.t = agent_last = (await agent.store.last_message_at(CHANNEL)) + 4 * HOUR
+    assert await initiative.consider()
+    assert sent == ["爬山那天下雨了吗"]
+    ask = provider.bodies[1]
+    assert ask["response_format"] == {"type": "json_object"}
+    nudge = ask["messages"][-1]["content"]
+    assert nudge.startswith("[宿主] 这不是老爹发的消息") and "4 小时" in nudge
+    assert ask["messages"][0] == provider.bodies[0]["messages"][0]  # Same cached prefix.
+    # Unanswered: no second message however long the silence.
+    clock.t = agent_last + 30 * HOUR
+    assert not await initiative.consider() and len(provider.bodies) == 2
+    await say(agent, Chat(), "没下")
+    user = provider.bodies[2]["messages"][-1]["content"]
+    assert user.startswith(SELF_TAG) and "爬山那天下雨了吗" in user
+
+
+async def test_declines_quietly_and_respects_limits(make_agent):
+    provider = Provider(completion("嗯"), completion('{"message": null}'))
+    agent, initiative, clock, sent = await setup(make_agent, provider)
+    await say(agent, Chat(), "hi")
+    clock.t += 5 * HOUR
+    assert not await initiative.consider() and sent == [] and len(provider.bodies) == 2
+    # At most one look an hour.
+    clock.t += 600
+    assert not await initiative.consider() and len(provider.bodies) == 2
+    clock.t += HOUR
+    initiative.sent = [clock.t - 60] * agent.settings.agent_initiative_per_day
+    assert not await initiative.consider() and len(provider.bodies) == 2
+    initiative.sent = []
+    initiative.set_enabled(False)
+    assert not await initiative.consider()
+    assert "关着" in initiative.status()
+    # Persisted across restarts.
+    again = Initiative(agent, None, clock=clock)
+    assert not again.enabled and again.last_look == initiative.last_look
+
+
+async def test_quiet_hours_and_running_turns_block_reaching_out(make_agent):
+    provider = Provider(completion("嗯"))
+    agent, initiative, clock, sent = await setup(make_agent, provider)
+    await say(agent, Chat(), "hi")
+    clock.t += 5 * HOUR
+    initiative.now = lambda: datetime(2026, 10, 22, 5)
+    agent.settings = replace(agent.settings, agent_quiet_hours="03:00-11:00")
+    initiative.settings = agent.settings
+    assert not await initiative.consider() and len(provider.bodies) == 1
+
+
+async def test_proactive_command_and_status(make_agent):
+    agent, initiative, clock, sent = await setup(make_agent, Provider())
+    chat = Chat()
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!proactive off", chat=chat)
+    assert "关着" in chat.sent[-1] and not initiative.enabled
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!proactive on", chat=chat)
+    assert chat.sent[-1].startswith("主动找你：开着 · 过去 24 小时 0/3 次")
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!proactive x", chat=chat)
+    assert "用法" in chat.sent[-1]
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!status", chat=chat)
+    assert "主动找你：开着" in chat.sent[-1]
+
+
+async def test_reflection_progress_survives_a_restart(make_agent, agent_settings):
+    notes = json.dumps({"我们之间": ["聊了加班"]}, ensure_ascii=False)
+    provider = Provider(completion("辛苦"), completion(notes), completion("晚安"), completion("{}"))
+    agent = await make_agent(provider)
+    await say(agent, Chat(), "加班好累")
+    await agent._reflect(CHANNEL, await agent.store.load(CHANNEL))
+    agent = await make_agent(provider)  # Restarted.
+    await say(agent, Chat(), "睡了")
+    await agent._reflect(CHANNEL, await agent.store.load(CHANNEL))
+    looked_at = provider.bodies[3]["messages"][1]["content"].split("<chat>")[1]
+    assert "加班" not in looked_at and "睡了" in looked_at
+
+
+MESSY = "# memory\n\n## 老爹\n- 熬夜（10-22）\n- 熬夜写代码（10-22）\n\n## 做事备忘\n- 用 uv\n" + (
+    "- 填充\n" * 20
+)
+
+
+@pytest.mark.parametrize(
+    ("answer", "accepted"),
+    [
+        ("# memory\n\n## 老爹\n- 熬夜写代码（10-22）\n\n## 做事备忘\n- 用 uv\n- 填充", True),
+        ("# memory\n\n## 老爹\n- 熬夜写代码（10-22）", False),  # Lost a section.
+        ("```markdown\n" + MESSY + MESSY + "\n```", False),  # Not shorter.
+        ("## 老爹\n## 做事备忘", False),  # Too much dropped.
+    ],
+)
+async def test_memory_tidy_keeps_sections_and_a_backup(
+    make_agent, agent_settings, answer, accepted
+):
+    agent_settings.agent_memory_path.write_text(MESSY, encoding="utf-8")
+    agent = await make_agent(Provider(completion(answer)))
+    assert await agent.tidy_memory() is accepted
+    memory = agent_settings.agent_memory_path.read_text(encoding="utf-8")
+    backup = agent_settings.agent_memory_path.with_name("memory.md.bak")
+    if accepted:
+        assert memory == answer + "\n" and backup.read_text(encoding="utf-8") == MESSY
+    else:
+        assert memory == MESSY and not backup.exists()
+
+
+def big(tokens):
+    response = completion("嗯")
+    response["usage"] = {"prompt_tokens": tokens, "completion_tokens": 0, "total_tokens": tokens}
+    return response
+
+
+async def test_with_auto_compaction_off_it_only_warns(make_agent, store):
+    provider = Provider(big(310_000), big(320_000), big(520_000))
+    agent = await make_agent(provider, agent_compact_tokens=0)
+    chat = Chat()
+    for text in ("a", "b", "c"):
+        await say(agent, chat, text)
+    assert len(provider.bodies) == 3  # No summary request was made.
+    warnings = [text for text in chat.sent if text.startswith("-# 📦")]
+    assert len(warnings) == 2 and "310k" in warnings[0] and "520k" in warnings[1]
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!status", chat=chat)
+    assert "自动压缩已关" in chat.sent[-1]
+
+
+def test_compact_tokens_setting_accepts_zero_but_not_tiny_values():
+    base = {"DISCORD_BOT_TOKEN": "t", "DEEPSEEK_API_KEY": "k", "ALLOWED_CHANNEL_IDS": "100"}
+    assert Settings.from_env({**base, "AGENT_COMPACT_TOKENS": "0"}).agent_compact_tokens == 0
+    with pytest.raises(ConfigurationError, match="AGENT_COMPACT_TOKENS"):
+        Settings.from_env({**base, "AGENT_COMPACT_TOKENS": "500"})
+
+
+async def test_dm_side_updates_status_and_profile(make_agent, agent_settings):
+    image = agent_settings.agent_workdir / "new-avatar.png"
+    image.write_bytes(PNG)
+    provider = Provider(
+        completion(
+            "",
+            [
+                ("update_profile", {"field": "status", "value": "想你了", "state": "online"}),
+                ("update_profile", {"field": "avatar", "value": "new-avatar.png"}),
+                ("update_profile", {"field": "about", "value": "x" * 500}),
+            ],
+        ),
+        completion("改好了"),
+    )
+    agent = await make_agent(provider)
+    calls = []
+
+    class Profile:
+        async def set_status(self, text, state=None):
+            calls.append(("status", text, state))
+            return "状态已经改成 「想你了」 · 在线"
+
+        async def edit(self, field, value):
+            from discord_dfy.profile import ProfileError
+
+            if field == "about":
+                raise ProfileError("简介最多 400 字")
+            calls.append((field, value))
+            return "头像换好了"
+
+    agent.profile = Profile()
+    await say(agent, Chat(), "换个头像吧，就用 new-avatar.png")
+    first, second = provider.bodies
+    assert "update_profile" in {tool["function"]["name"] for tool in first["tools"]}
+    assert "先跟老爹商量" in first["messages"][0]["content"]
+    assert calls == [("status", "想你了", "online"), ("avatar", str(image))]
+    results = [m["content"] for m in second["messages"] if m["role"] == "tool"]
+    assert results == ["状态已经改成 「想你了」 · 在线", "头像换好了", "错误：简介最多 400 字"]
+
+
+def test_memory_notes_are_written_in_first_person(tmp_path):
+    from discord_dfy.memory import add_memory_notes
+
+    path = tmp_path / "memory.md"
+    add_memory_notes(path, {"群里的人和事": ["阿明爱逗小鲸鱼，管小鲸鱼叫大肥鱼"]})
+    assert "- 阿明爱逗我，管我叫大肥鱼（" in path.read_text(encoding="utf-8")
+
+
+def test_looking_back_keeps_his_words_apart_from_host_notes():
+    turn = (
+        "[宿主记录] 上次私聊之后群里的动静：\n#聊天 22:45 小红：这可是sora主人给你起的名字\n\n"
+        "[宿主记录] 10-23 22:46 你在群里的时候私信了老爹（这是你自己发的，老爹已经看到）：\n"
+        "-# 💬 从 群 #聊天 过来私信你\n小红 一进来就叫我大肥鱼\n\n"
+        "[2026-10-23 22:50] 我去骂他\n\n[2026-10-23 22:51] 算了"
+    )
+    owner, mine = host_agent.split_host_notes(turn)
+    assert owner == "[2026-10-23 22:50] 我去骂他\n\n[2026-10-23 22:51] 算了"
+    assert mine == ["小红 一进来就叫我大肥鱼"]
+    assert host_agent.split_host_notes("[2026-10-23 22:50] 嗨") == ("[2026-10-23 22:50] 嗨", [])
+
+
+async def test_group_events_are_not_remembered_as_his_words(make_agent):
+    from discord_dfy.group_chat import ChatLine, GroupChat
+
+    provider = Provider(completion("哈"), completion("{}"))
+    agent = await make_agent(provider)
+    agent.group = GroupChat(agent.settings, agent.client, GroupTransport())
+    window = agent.group._window(100, ("朋友群", "#闲聊"), 10)
+    when = agent.group_seen + timedelta(microseconds=1)
+    agent.group._append(window, ChatLine(1, 30, "小红", "sora主人", when))
+    await say(agent, Chat(), "你好")
+    await agent._reflect(CHANNEL, await agent.store.load(CHANNEL))
+    looked_at = provider.bodies[1]["messages"][1]["content"].split("<chat>")[1]
+    assert "【老爹】[" in looked_at and "你好" in looked_at
+    assert "sora主人" not in looked_at
+    await agent.group.close()
+
+
+async def test_no_reaching_out_while_a_group_side_dm_is_unanswered(make_agent):
+    provider = Provider(completion("嗯"))
+    agent, initiative, clock, sent = await setup(make_agent, provider)
+    await say(agent, Chat(), "hi")
+    await agent.note_outgoing(CHANNEL, "群里的事", "group")
+    clock.t += 5 * HOUR
+    assert not await initiative.consider() and len(provider.bodies) == 1
