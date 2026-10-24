@@ -1,0 +1,39 @@
+[project]
+name = "discord-dfy"
+version = "0.4.0"
+description = "小鲸鱼: a DeepSeek-powered Discord companion — group chat member and owner DM agent"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "aiosqlite>=0.22.1",
+    "discord-py>=2.7.1",
+    "openai>=3.35.1",
+    "python-dotenv>=1.2.4",
+    "rich>=14.0,<15",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3,<10",
+    "pytest-asyncio>=1.0,<2",
+    "ruff>=0.11,<1",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[project.scripts]
+discord-dfy = "discord_dfy:main"
+dfy-monitor = "discord_dfy.monitor:main"
+
+[build-system]
+requires = ["uv_build>=0.12.15,<0.13.0"]
+build-backend = "uv_build"
