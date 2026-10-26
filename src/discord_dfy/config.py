@@ -45,19 +45,19 @@ class Settings:
     personal_mode_enabled: bool = False
     owner_discord_user_id: int | None = None
     personal_database_path: Path = Path("data/personal.sqlite3")
-    agent_workdir: Path = field(default_factory=Path.home)
+    # Her own folder: diary, writings, saved pictures. Nothing else on the computer.
+    agent_room_dir: Path = Path("data/room")
     agent_model: str = "deepseek-flash"
     agent_thinking: bool = True
     agent_reasoning_effort: str = "high"
     agent_max_steps: int = 60
-    agent_command_timeout_seconds: int = 300
     agent_context_chars: int = 2000000
     agent_compact_tokens: int = 200000
     agent_memory_path: Path = Path("data/memory.md")
     agent_reflect_seconds: int = 600
     agent_initiative: bool = True
-    agent_initiative_per_day: int = 3
-    agent_initiative_idle_minutes: int = 180
+    agent_initiative_per_day: int = 0  # 0 = no daily cap.
+    agent_initiative_idle_minutes: int = 30
     agent_quiet_hours: str = "03:00-11:00"
     agent_show_tools: bool = True
     agent_show_reasoning: bool = False
@@ -124,10 +124,7 @@ class Settings:
         if personal and owner is None:
             raise ConfigurationError("Set OWNER_DISCORD_USER_ID before enabling Personal Mode.")
         personal_path = env.get("PERSONAL_DATABASE_PATH", "data/personal.sqlite3").strip()
-        workdir = env.get("AGENT_WORKDIR", "").strip()
-        workdir_path = Path(workdir) if workdir else Path.home()
-        if personal and not workdir_path.is_dir():
-            raise ConfigurationError("AGENT_WORKDIR must be an existing directory.")
+        room_dir = env.get("AGENT_ROOM_DIR", "data/room").strip() or "data/room"
         agent_model = env.get("AGENT_MODEL", "deepseek-flash").strip()
         if not agent_model:
             raise ConfigurationError("AGENT_MODEL must not be empty.")
@@ -173,19 +170,18 @@ class Settings:
             personal_mode_enabled=personal,
             owner_discord_user_id=owner,
             personal_database_path=Path(personal_path),
-            agent_workdir=workdir_path,
+            agent_room_dir=Path(room_dir),
             agent_model=agent_model,
             agent_thinking=boolean("AGENT_THINKING", "true"),
             agent_reasoning_effort=agent_effort,
             agent_max_steps=integer("AGENT_MAX_STEPS", 60, 1, 1000),
-            agent_command_timeout_seconds=integer("AGENT_COMMAND_TIMEOUT_SECONDS", 300, 5, 3600),
             agent_context_chars=integer("AGENT_CONTEXT_CHARS", 2000000, 20000, 4000000),
             agent_compact_tokens=compact_tokens,
             agent_memory_path=Path(memory_path),
             agent_reflect_seconds=integer("AGENT_REFLECT_SECONDS", 600, 0, 86400),
             agent_initiative=boolean("AGENT_INITIATIVE", "true"),
-            agent_initiative_per_day=integer("AGENT_INITIATIVE_PER_DAY", 3, 1, 24),
-            agent_initiative_idle_minutes=integer("AGENT_INITIATIVE_IDLE_MINUTES", 180, 10, 10080),
+            agent_initiative_per_day=integer("AGENT_INITIATIVE_PER_DAY", 0, 0, 100),
+            agent_initiative_idle_minutes=integer("AGENT_INITIATIVE_IDLE_MINUTES", 30, 10, 10080),
             agent_quiet_hours=quiet_hours,
             agent_show_tools=boolean("AGENT_SHOW_TOOLS", "true"),
             agent_show_reasoning=boolean("AGENT_SHOW_REASONING", "false"),

@@ -2,8 +2,9 @@
 
     [{"name": "我不知道耶", "file": "deepseek-si-kao-bu-zhi-dao.png", "when": "装傻"}]
 
-The DM agent can add to it (copy an image in, add an entry); the group brain picks one by
-name. Read on every use, so additions take effect without a restart.
+The DM side adds to it with save_picture and sends one with a "[表情包：名字]" line; the
+group brain picks one by name. Read on every use, so additions take effect without a
+restart (the DM prompt lists them once per conversation).
 """
 
 import json

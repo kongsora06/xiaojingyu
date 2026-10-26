@@ -1,6 +1,6 @@
 """Her one long-term memory: a Markdown file shared by the DM side and the group side.
 
-The DM agent edits it with its tools and adds notes when it looks back over a chat; the
+The DM side adds lines with its remember tool and when it looks back over a chat; the
 group side adds notes about the people and things in the group. Both read it. What the
 owner says in DMs is in here too: the group side is told to keep those secrets.
 """
@@ -28,6 +28,7 @@ MEMORY_TIDY_PROMPT = """下面是你（小鲸鱼）的记忆文件，里面有�
 - 同一件事记了好几遍（哪怕说法不同）就合并成一条，保留最完整的细节和最早的日期。
 - 明显过时或者被后来的事推翻的删掉；"做事备忘" 一节只合并重复，内容不要改。
 - 别丢掉具体的事：谁说了什么、哪天、你当时的感受，这些是记忆的价值所在。
+- "老爹" 一节里他吃了什么、几点上下班、几点睡这类流水账，合并成一两条稳定的习惯。
 - 每条一行 "- "，日期留在条目末尾的括号里。
 - 统一用第一人称：说到自己一律写"我"（把"小鲸鱼"改成"我"），说到老爹就写"老爹"。
 只输出整理后的完整文件。"""
