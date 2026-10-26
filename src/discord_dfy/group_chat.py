@@ -64,9 +64,6 @@ CALLED_DELAY, CALLED_MAX_WAIT = 2.5, 6.0
 ENGAGED_SECONDS = 300.0
 # Follow-ups wait for a short lull, so a burst of messages gets one reply, not one each.
 FOLLOWUP_DELAY, FOLLOWUP_MAX_WAIT = 6.0, 20.0
-# Plain messages count as follow-ups only until she has spoken up this many times in a row
-# without being called; then they wait for the normal (level-paced) chance again.
-FOLLOWUP_STREAK = 2
 # Discord says when someone starts typing, again about every 8 s while they keep at it.
 # While someone is typing she waits for their message, but never longer than this.
 TYPING_SECONDS = 10.0
@@ -258,8 +255,6 @@ class Window:
     wake: asyncio.Event = field(default_factory=asyncio.Event)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     generation: int = 0
-    # Times in a row she spoke up without being called (follow-ups and ambient).
-    unprompted: int = 0
     # When someone (not her) last started typing here.
     typing_at: float = float("-inf")
     last_bot_at: float = float("-inf")
@@ -379,13 +374,8 @@ class GroupChat:
             return "must"
         if NAME.search(line.content):
             return "called"
-        if self.clock() - window.last_bot_at >= ENGAGED_SECONDS:
-            window.unprompted = 0  # The conversation she was in is over.
-            return "ambient"
-        if self.quiet_now() or window.unprompted >= FOLLOWUP_STREAK:
-            # She has chimed in enough without being called; back to the normal pace.
-            return "ambient"
-        return "followup"
+        engaged = self.clock() - window.last_bot_at < ENGAGED_SECONDS
+        return "followup" if engaged and not self.quiet_now() else "ambient"
 
     def note_self(self, channel_id: int, line: ChatLine) -> None:
         """Something the bot said in the channel (any path), kept in order with the chat."""
@@ -854,10 +844,6 @@ class GroupChat:
                 await self.sleep(min(6.0, 2.0 + len(plan.dm_owner) / 20) * self.pace)
             await self._message_owner(window, plan.dm_owner)
         outcome = "spoke" if sent else "reacted" if plan.reaction else "silent"
-        if trigger in {"must", "called"}:
-            window.unprompted = 0
-        elif sent:
-            window.unprompted += 1
         await self._record(
             channel_id,
             trigger,
