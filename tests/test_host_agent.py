@@ -180,6 +180,7 @@ async def test_she_keeps_notes_quietly_with_a_persons_tools(make_agent, store, a
     assert first["model"] == "deepseek-flash" and first["thinking"] == {"type": "enabled"}
     assert {tool["function"]["name"] for tool in first["tools"]} == {
         "remember",
+        "rewrite_self",
         "write_diary",
         "read_diary",
         "room_list",
@@ -1436,3 +1437,44 @@ async def test_no_reaching_out_while_he_is_typing(make_agent):
     clock.t += 5 * HOUR
     agent.note_typing(CHANNEL)
     assert not await initiative.consider() and len(provider.bodies) == 1
+
+
+async def test_she_rewrites_her_self_portrait_and_keeps_the_old_one(make_agent, agent_settings):
+    from discord_dfy.group_chat import GroupChat
+
+    first = "我嘴硬，爱顶人，喜欢座头鲸。"
+    second = "我还是嘴硬，但开始学着好好说话了。小鲸鱼最近迷上了看云。"
+    provider = Provider(
+        completion("", [("rewrite_self", {"text": first})]),
+        completion("嗯"),
+        completion("", [("rewrite_self", {"text": second}), ("rewrite_self", {"text": ""})]),
+        completion("好了"),
+        completion("在"),
+    )
+    agent = await make_agent(provider)
+    chat = Chat()
+    await say(agent, chat, "你觉得你是什么样的人")
+    system = provider.bodies[0]["messages"][0]["content"]
+    assert "<self>\n（这是你自己写的你" in system and "（还没写。）" in system
+    assert system.index("<self>") < system.index("下面是你在这里的规矩")
+    results = [m["content"] for m in provider.bodies[1]["messages"] if m["role"] == "tool"]
+    assert results == ["写好了（下次新对话时生效，群里马上生效）"]
+    path = agent_settings.agent_memory_path.with_name("self.md")
+    await say(agent, chat, "再想想")
+    results = [m["content"] for m in provider.bodies[3]["messages"] if m["role"] == "tool"]
+    assert results[-2:] == ["写好了（下次新对话时生效，群里马上生效）", "错误：写点什么再存"]
+    # First person, and the previous version is kept.
+    assert path.read_text(encoding="utf-8") == second.replace("小鲸鱼", "我") + "\n"
+    (old,) = (path.parent / "self-history").iterdir()
+    assert old.read_text(encoding="utf-8") == first + "\n"
+    # Frozen within the conversation (cache); the new one comes with the next one.
+    assert provider.bodies[3]["messages"][0] == provider.bodies[0]["messages"][0]
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!new", chat=chat)
+    await say(agent, chat, "在吗")
+    assert "开始学着好好说话了" in provider.bodies[4]["messages"][0]["content"]
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!self", chat=chat)
+    assert chat.sent[-1].endswith("开始学着好好说话了。我最近迷上了看云。")
+    # The group side reads the same page.
+    group = GroupChat(agent_settings, agent.client, GroupTransport())
+    assert group.self_path == path
+    await group.close()

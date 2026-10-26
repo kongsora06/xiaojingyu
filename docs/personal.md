@@ -52,6 +52,7 @@ pwsh scripts\install_service.ps1 -Uninstall # 停止并移除
 | 工具 | 是什么 |
 | --- | --- |
 | `remember` | 小本子：一句话，记在长期记忆对应的一节下面，带日期，重复的跳过 |
+| `rewrite_self` | 她自己写的“我”（`data/self.md`，2000 字以内）：整篇重写，旧版本自动留在 `data/self-history/` |
 | `write_diary` / `read_diary` | 日记：`data/room/diary/年-月.md`，按日期时间记；可以翻某一天、某个月或最近几篇 |
 | `room_list` / `room_read` / `room_write` | 她的房间 `data/room/`：诗、清单、自己做的小东西，怎么摆她说了算 |
 | `save_picture` | 把网上的图片（或房间里已有的图）收进 `data/room/pictures/`；`sticker=true` 时同时加进表情包库 |
@@ -74,6 +75,7 @@ pwsh scripts\install_service.ps1 -Uninstall # 停止并移除
 - `!think`：开/关私信里的思考过程（折叠在剧透块里，最长约 1700 字）。
 - `!compact`：立即把当前对话压缩成一份摘要。
 - `!memory`：看她的小本子（太长时作为附件发来）。
+- `!self`：看她自己写的“我”。
 - `!groupmemory`：看小本子里群里的那一节。
 - `!restart`：重启 Bot。
 
@@ -120,8 +122,15 @@ uv run dfy-monitor            # --verbose 另显示任务/模型状态
 ## 人设：起点加成长
 
 `src/discord_dfy/persona.md` 只是一页初始设定：她是老爹的女儿，有点傲娇嘴硬、对老爹软，
-有自己的一摊事。之后她长成什么样，写在小本子的「我是什么样的」一节，比人设更算数。
-认人的安全规则（谁是老爹只看 ID）在宿主规则里。
+有自己的一摊事。她长成什么样由她自己写：
+
+- `data/self.md`（`<self>`）：她自己写的“我是个什么样的人”，紧跟在初始设定后面，比它更算数。
+  她用 `rewrite_self` 整篇重写，觉得自己真有变化了才改；你不在时她自己待着的那段时间也可能改。
+  每次改动前的版本都留在 `data/self-history/`，想退回就把那份复制回 `data/self.md`。
+  私聊里新对话（`!new` 或压缩）时生效，群里马上生效。`!self` 查看。
+- 小本子的「我是什么样的」一节：回想聊天时零零碎碎记下的对自己的发现，是她改写 `<self>` 的素材。
+
+名字、她是老爹的女儿、认人的安全规则（谁是老爹只看 ID）这些不靠 `<self>` 改，也改不了。
 
 ## 你不在的时候（她自己待着、主动找你）
 

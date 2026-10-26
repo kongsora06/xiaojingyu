@@ -76,6 +76,7 @@ Fetch API).
 | `!status` | Context size, token usage, settings |
 | `!compact` | Summarize the older part of the conversation |
 | `!memory` / `!groupmemory` | Show her memory / its group section |
+| `!self` | Show the self-portrait she wrote |
 | `!think` | Show or hide her thinking in DMs |
 | `!group`, `!group on/off`, `!group level 0-3`, `!quiet 30m` | Group chat controls |
 | `!proactive on/off` | Let her message you first |
@@ -84,7 +85,8 @@ Fetch API).
 ## Data
 
 Everything personal stays local and out of Git (`.gitignore` covers `.env` and `data/`):
-`data/memory.md` (her memory), `data/room/` (her room and diary — hers alone),
+`data/memory.md` (her memory), `data/self.md` and `data/self-history/` (who she says she is,
+rewritten by her), `data/room/` (her room and diary — hers alone),
 `data/personal.sqlite3` (DM history), `data/bot.sqlite3` (group messages and decision
 metadata), `data/stickers/`, `data/dm_images/`, logs and monitor events. Set `STORE_MESSAGES=false` to stop storing group messages; the bot still reads recent
 chat in memory to follow the conversation. Logs never include message content and redact

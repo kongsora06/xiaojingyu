@@ -1,4 +1,5 @@
-"""Her own things in the owner's DMs: a notebook (the memory file), a diary, and a room.
+"""Her own things in the owner's DMs: a notebook (the memory file), her self-portrait, a
+diary, and a room.
 
 The room (data/room/) is a folder that is hers alone: poems, lists, things she makes,
 pictures she saves. Every path she gives is resolved inside it; nothing else on the
@@ -47,6 +48,22 @@ TOOLS = [
                     "section": {"type": "string", "enum": list(MEMORY_SECTIONS)},
                 },
                 "required": ["text", "section"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "rewrite_self",
+            "description": (
+                "重写 <self>：你自己写的“我是个什么样的人”"
+                "（性格、脾气、喜好、说话方式、在意的东西）。"
+                "整篇换成新写的，用第一人称，2000 字以内；旧的会自动留底。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"text": {"type": "string", "description": "完整的新版本"}},
+                "required": ["text"],
             },
         },
     },
@@ -499,6 +516,8 @@ def what_she_did(name: str, arguments: dict) -> str | None:
     path = str(arguments.get("path") or "").strip()
     if name == "write_diary":
         return "写了日记"
+    if name == "rewrite_self":
+        return "重写了 <self> 里自己写的“我”"
     if name == "room_write":
         return f"在房间里写了 {path}"
     if name == "save_picture":
