@@ -9,10 +9,12 @@ places:
   search before answering, change her Discord status, note things worth remembering, and
   privately DM the owner. In groups she only chats: no computer tools, no writing code.
   See the [group chat guide](docs/group.md).
-- **Owner DMs** (Personal Mode, opt-in): a DeepSeek tool loop running directly on this Windows
-  computer — PowerShell, file read/write/edit, sending files, viewing images, web search and
-  fetch, posting to the group, editing her Discord profile with the owner's OK. She can also
-  message the owner first after a quiet spell. See the [Personal Mode guide](docs/personal.md).
+- **Owner DMs** (Personal Mode, opt-in): she chats like a person texting — replies arrive as
+  separate messages, with stickers. She has a person's things, not a workbench: a notebook
+  (her memory), a diary, a room of her own (`data/room/`) for writings and saved pictures,
+  web search, her Discord status and profile (with the owner's OK), and the group. No shell
+  and no access to other files. She can also message the owner first after a quiet spell.
+  See the [Personal Mode guide](docs/personal.md).
 
 Both sides share the short starting persona in [`persona.md`](src/discord_dfy/persona.md) and one
 long-term memory file (`data/memory.md`) that she keeps growing herself. Private DM talk is not
@@ -48,8 +50,8 @@ DEEPSEEK_API_KEY=your_deepseek_api_key
 ALLOWED_CHANNEL_IDS=123456789012345678,234567890123456789
 ```
 
-For owner DMs also set `PERSONAL_MODE_ENABLED=true`, `OWNER_DISCORD_USER_ID` and
-`AGENT_WORKDIR`. Every other setting (chattiness, memory, reaching out, quiet hours, context
+For owner DMs also set `PERSONAL_MODE_ENABLED=true` and `OWNER_DISCORD_USER_ID`. Every other
+setting (chattiness, memory, reaching out, quiet hours, context
 compaction, monitor, paths) is documented with its default in [`.env.example`](.env.example).
 Model calls, image input and web search all use the one DeepSeek key (`deepseek-flash`, Search /
 Fetch API).
@@ -82,9 +84,9 @@ Fetch API).
 ## Data
 
 Everything personal stays local and out of Git (`.gitignore` covers `.env` and `data/`):
-`data/memory.md` (her memory), `data/personal.sqlite3` (DM history), `data/bot.sqlite3`
-(group messages and decision metadata), `data/stickers/`, `data/dm_images/`, logs and monitor
-events. Set `STORE_MESSAGES=false` to stop storing group messages; the bot still reads recent
+`data/memory.md` (her memory), `data/room/` (her room and diary — hers alone),
+`data/personal.sqlite3` (DM history), `data/bot.sqlite3` (group messages and decision
+metadata), `data/stickers/`, `data/dm_images/`, logs and monitor events. Set `STORE_MESSAGES=false` to stop storing group messages; the bot still reads recent
 chat in memory to follow the conversation. Logs never include message content and redact
 configured secrets.
 
@@ -97,8 +99,8 @@ src/discord_dfy/
   config.py              Validate .env
   discord_bot.py         Discord events, slash commands, delivery
   group_chat.py          Group chat brain: timing, plans, stickers, search, status
-  host_agent.py          Owner-DM tool loop, commands, looking back into memory
-  host_tools.py          PowerShell and file tools on this computer
+  host_agent.py          Owner-DM loop, commands, texting delivery, looking back into memory
+  host_tools.py          Her things: notebook, diary, room, saving pictures
   initiative.py          Reaching out to the owner first
   memory.py              The shared memory file: notes, sections, tidying
   persona.md, persona.py Starting persona and host identity rules

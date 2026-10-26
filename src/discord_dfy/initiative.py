@@ -1,10 +1,13 @@
 """She messages the owner first: after a quiet spell, the model decides whether it has
-something it actually wants to say (a follow-up, a reminder, a thought, missing them).
+something it actually wants to say (its own news, a whim, wanting something, missing him,
+how his day went, a reminder he asked for). The same look may also leave a few lines in
+her diary.
 
 The host decides only *when* it may ask: never during quiet hours, never while a turn is
-running, never with a previous unanswered message of hers waiting, at most a few times a
-day, and at most one look an hour. What she sends reaches the DM conversation the same way
-as group-side DMs: with the owner's next message.
+running, and only after the gap since they last talked (AGENT_INITIATIVE_IDLE_MINUTES).
+Each message of hers he hasn't answered yet doubles that gap, so she may text again but
+won't keep texting all night while he sleeps. A daily cap is optional. What she sends
+reaches the DM conversation the same way as group-side DMs: with the owner's next message.
 """
 
 import asyncio
@@ -21,16 +24,22 @@ from .host_agent import fit, loads, request_messages, save_json
 
 log = logging.getLogger(__name__)
 CHECK_SECONDS = 600
-# While eligible, look at most this often (each look is one model request).
-LOOK_GAP_SECONDS = 3600
+# The gap stops doubling here (unanswered messages).
+MAX_GAP_SECONDS = 8 * 3600
 WEEKDAYS = "一二三四五六日"
 NUDGE = """[宿主] 这不是老爹发的消息，是宿主在问你。现在是 {now}（周{weekday}）。
 老爹上次跟你说话是 {ago} 前。你过去 24 小时主动找过他 {count} 次。{pending}{group}
-你想不想主动找他说点什么？比如：接着之前聊过的事问问后来怎样了（记忆里他的计划、在忙的事、心情），
-提醒他在意的事，分享你自己想到的或者看到的，单纯想他了，时间晚了关心一下作息。
-要像真的想到了才找他，不要为了找话而找话；没有想说的就不发，不打扰也是一种体贴。
-只输出 JSON：{{"message": "要发的话"}} 或 {{"message": null}}。
-要发就用你平时私聊的口吻，1～5 句，别提到宿主。"""
+你这会儿想找老爹吗？女儿给爸爸发消息，多半是因为自己这边有事，或者惦记着他：
+群里谁逗到你或者惹到你了、突然想到一件事、想要个什么、想让他评评理、闲得发慌、想他了，
+或者记着他那头的事（他说过几点下班、今天要干嘛），想知道后来怎样了。
+想发就照你这会儿的心情直接说，几个字、一句话、几句话都行；
+不用为了盯他吃饭睡觉找他，开口也不用报时间。他托你到点提醒的事，到点了就提醒一句。
+他说了去睡、在上班、在写作业，就别隔一阵戳他一次，等他差不多回来了再说。
+看看你前几次主动找他说的是什么，这次别又是同一种；没什么想说的就不发。
+他没回你，多半是在忙或者睡了；要不要再找他、说什么，你自己看着办。
+这会儿你也可以给自己写几句日记（今天怎么样、心情、在琢磨什么），想写才写，不写就是 null。
+只输出 JSON：{{"message": "要发的话或 null", "diary": "日记或 null"}}。
+用你平时私聊的口吻，别提到宿主。"""
 
 
 def in_quiet_hours(spec: str, moment: datetime) -> bool:
@@ -95,11 +104,17 @@ class Initiative:
         if not self.enabled:
             return "主动找你：关着"
         quiet = self.settings.agent_quiet_hours or "无"
+        cap = self.settings.agent_initiative_per_day
         return (
-            f"主动找你：开着 · 过去 24 小时 {self.sent_today()}/"
-            f"{self.settings.agent_initiative_per_day} 次 · 你安静 "
-            f"{self.settings.agent_initiative_idle_minutes} 分钟后才会考虑 · 免打扰 {quiet}"
+            f"主动找你：开着 · 过去 24 小时 {self.sent_today()}"
+            f"{f'/{cap}' if cap else ''} 次 · 间隔至少 "
+            f"{self.settings.agent_initiative_idle_minutes} 分钟（你没回就翻倍）· 免打扰 {quiet}"
         )
+
+    def gap(self, unanswered: int) -> float:
+        """Seconds of quiet needed before she may look: doubles per unanswered message."""
+        base = self.settings.agent_initiative_idle_minutes * 60
+        return min(base * 2 ** min(unanswered, 10), max(base, MAX_GAP_SECONDS))
 
     def start(self) -> None:
         if self.settings.agent_initiative and self.task is None:
@@ -125,9 +140,8 @@ class Initiative:
             return False
         if in_quiet_hours(settings.agent_quiet_hours, self.now()):
             return False
-        if self.sent_today() >= settings.agent_initiative_per_day:
-            return False
-        if self.clock() - self.last_look < LOOK_GAP_SECONDS:
+        cap = settings.agent_initiative_per_day
+        if cap and self.sent_today() >= cap:
             return False
         channel = await self.agent.latest_channel()
         if channel is None:
@@ -135,9 +149,11 @@ class Initiative:
         worker = self.agent.workers.get(channel)
         if worker is not None and not worker.done():
             return False
+        # What she sent him (here or from the group) that he hasn't answered yet.
         pending = self.agent.outgoing.get(channel, [])
-        if pending:
-            return False  # Something she sent him is still unanswered; don't double-text.
+        gap = self.gap(len(pending))
+        if self.clock() - self.last_look < gap:
+            return False  # She passed on it recently; each look is one model request.
         store = self.agent.store
         last = max(
             [
@@ -147,7 +163,7 @@ class Initiative:
             ]
         )
         idle = self.clock() - last
-        if idle < settings.agent_initiative_idle_minutes * 60:
+        if idle < gap:
             return False
         self.last_look = self.clock()
         self._save()
@@ -198,8 +214,14 @@ class Initiative:
             log.warning("Initiative request failed; error_type=%s", type(error).__name__)
             return None
         content = (response.choices[0].message.content or "") if response.choices else ""
-        data = loads(content)
-        message = data.get("message") if data else None
+        data = loads(content) or {}
+        diary = data.get("diary")
+        if isinstance(diary, str) and diary.strip():
+            try:
+                await asyncio.to_thread(agent.room.write_diary, diary[:4000], moment)
+            except OSError:
+                log.warning("Could not write the diary")
+        message = data.get("message")
         if not isinstance(message, str) or not message.strip():
             return None
         return agent.sanitize(message.strip())[:1800]

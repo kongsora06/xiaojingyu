@@ -26,9 +26,10 @@ from discord_dfy.host_agent import (
     fit,
     request_messages,
     split_for_compaction,
+    texts,
     transcript,
 )
-from discord_dfy.host_tools import HostTools, ToolError, describe_call
+from discord_dfy.host_tools import Room, ToolError, describe_call, download_image
 from discord_dfy.initiative import SELF_TAG, Initiative, ago, in_quiet_hours
 from discord_dfy.monitor_protocol import Publisher
 from discord_dfy.service import AgentService
@@ -92,14 +93,12 @@ class Chat:
 
 @pytest.fixture
 def agent_settings(settings, tmp_path):
-    workdir = tmp_path / "work"
-    workdir.mkdir()
     return replace(
         settings,
         personal_mode_enabled=True,
         owner_discord_user_id=OWNER,
         personal_database_path=tmp_path / "personal.sqlite3",
-        agent_workdir=workdir,
+        agent_room_dir=tmp_path / "room",
         agent_memory_path=tmp_path / "memory.md",
         agent_reflect_seconds=0,
     )
@@ -125,6 +124,7 @@ async def make_agent(agent_settings, store):
             http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(provider)),
         )
         agent = HostAgent(replace(agent_settings, **overrides), client, store)
+        agent.pace = 0  # No typing pauses between texts in tests.
         created.append((agent, client))
         return agent
 
@@ -165,33 +165,38 @@ async def test_disabled_personal_mode_ignores_owner(make_agent):
     assert not await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="hi", chat=Chat())
 
 
-async def test_tool_loop_runs_powershell_on_host_and_reports(make_agent, store, agent_settings):
+async def test_she_keeps_notes_quietly_with_a_persons_tools(make_agent, store, agent_settings):
     provider = Provider(
-        completion("我看看", [("powershell", {"command": "Write-Output '中文ok'"})], "想一想"),
-        completion("弄好了"),
+        completion(
+            "嗯哼", [("remember", {"text": "老爹周六要去爬山", "section": "老爹"})], "记一下"
+        ),
+        completion("爬山记得带水"),
     )
     agent = await make_agent(provider)
     chat = Chat()
-    assert await say(agent, chat, "帮我跑个命令")
-    assert chat.sent[0] == "我看看"
-    assert "`powershell`" in chat.sent[1] and chat.sent[1].startswith("-# 🔧")
-    assert chat.sent[-1] == "弄好了"
+    assert await say(agent, chat, "周六我去爬山")
+    assert chat.sent == ["嗯哼", "爬山记得带水"]  # No tool trail for her own things.
     first, second = provider.bodies
     assert first["model"] == "deepseek-flash" and first["thinking"] == {"type": "enabled"}
     assert {tool["function"]["name"] for tool in first["tools"]} == {
-        "powershell",
-        "read_file",
-        "write_file",
-        "edit_file",
+        "remember",
+        "write_diary",
+        "read_diary",
+        "room_list",
+        "room_read",
+        "room_write",
+        "save_picture",
         "send_file",
         "view_image",
     }
-    assert str(agent_settings.agent_workdir) in first["messages"][0]["content"]
+    system = first["messages"][0]["content"]
+    assert "powershell" not in system and "本机权限" not in system and "技术活不是你的事" in system
     tool_message = second["messages"][-1]
-    assert tool_message["role"] == "tool" and tool_message["tool_call_id"] == "call_0"
-    assert "exit_code=0" in tool_message["content"] and "中文ok" in tool_message["content"]
+    assert tool_message == {"role": "tool", "tool_call_id": "call_0", "content": "记好了"}
+    memory = agent_settings.agent_memory_path.read_text(encoding="utf-8")
+    assert "## 老爹\n- 老爹周六要去爬山（20" in memory
     # Reasoning goes back within the turn, but is never persisted.
-    assert second["messages"][-2]["reasoning_content"] == "想一想"
+    assert second["messages"][-2]["reasoning_content"] == "记一下"
     history = await store.load(CHANNEL)
     assert [m["role"] for m in history] == ["user", "assistant", "tool", "assistant"]
     assert all("reasoning_content" not in m for m in history)
@@ -221,19 +226,30 @@ async def test_new_starts_fresh_conversation_but_keeps_rows(make_agent, store):
     assert count[0] == 2
 
 
-async def test_stop_kills_running_command_and_keeps_history_valid(make_agent, store):
+class SlowWeb:
+    def __init__(self):
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def search(self, query, count):
+        self.started.set()
+        await self.release.wait()
+        return [{"title": "结果", "url": "https://r.example", "summary": query}]
+
+    async def fetch(self, url):
+        return {"title": "页面", "content": "正文"}
+
+
+async def test_stop_interrupts_a_running_tool_and_keeps_history_valid(make_agent, store):
     provider = Provider(
-        completion("", [("powershell", {"command": "Start-Sleep -Seconds 60"})]),
+        completion("", [("web_search", {"query": "慢慢搜"})]),
         completion("继续了"),
     )
     agent = await make_agent(provider)
+    agent.web = SlowWeb()
     chat = Chat()
-    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="睡一会", chat=chat)
-    for _ in range(200):
-        if any("powershell" in text for text in chat.sent):
-            break
-        await asyncio.sleep(0.05)
-    await asyncio.sleep(0.5)
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="搜一下", chat=chat)
+    await asyncio.wait_for(agent.web.started.wait(), 10)
     started = asyncio.get_running_loop().time()
     await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!stop", chat=chat)
     assert asyncio.get_running_loop().time() - started < 15
@@ -245,24 +261,17 @@ async def test_stop_kills_running_command_and_keeps_history_valid(make_agent, st
 
 
 async def test_message_during_a_turn_is_injected_after_tool_step(make_agent):
-    release = asyncio.Event()
     provider = Provider(
-        completion("", [("powershell", {"command": "Write-Output a"})]),
+        completion("", [("web_search", {"query": "A"})]),
         completion("收到新要求"),
     )
     agent = await make_agent(provider)
-    original = agent.tools.powershell
-
-    async def slow(*args):
-        await release.wait()
-        return await original(*args)
-
-    agent.tools.powershell = slow
+    agent.web = SlowWeb()
     chat = Chat()
-    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="先做A", chat=chat)
-    await asyncio.sleep(0.2)
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="先搜A", chat=chat)
+    await asyncio.wait_for(agent.web.started.wait(), 10)
     await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="改成B", chat=chat)
-    release.set()
+    agent.web.release.set()
     await asyncio.wait_for(agent.workers[CHANNEL], 30)
     roles = [m["role"] for m in provider.bodies[1]["messages"]]
     assert roles == ["system", "user", "assistant", "tool", "user"]
@@ -270,7 +279,7 @@ async def test_message_during_a_turn_is_injected_after_tool_step(make_agent):
 
 
 async def test_step_limit_pauses_runaway_loops(make_agent):
-    call = completion("", [("read_file", {"path": "missing.txt"})])
+    call = completion("", [("room_read", {"path": "missing.txt"})])
     provider = Provider(call, call, call)
     agent = await make_agent(provider, agent_max_steps=2)
     chat = Chat()
@@ -287,17 +296,30 @@ async def test_provider_error_is_reported_without_crashing(make_agent):
 
 
 async def test_send_file_and_tool_errors_are_returned_to_model(make_agent, agent_settings):
-    (agent_settings.agent_workdir / "shot.txt").write_text("x")
+    room = agent_settings.agent_room_dir
+    room.mkdir()
+    (room / "诗.md").write_text("x", encoding="utf-8")
+    secret = agent_settings.personal_database_path.parent / "secret.txt"
+    secret.write_text("no", encoding="utf-8")
     provider = Provider(
-        completion("", [("send_file", {"path": "shot.txt"}), ("read_file", {"path": "nope"})]),
+        completion(
+            "",
+            [
+                ("send_file", {"path": "诗.md"}),
+                ("room_read", {"path": "nope"}),
+                ("send_file", {"path": "../secret.txt"}),
+                ("room_read", {"path": str(secret)}),
+            ],
+        ),
         completion("发了"),
     )
     agent = await make_agent(provider)
     chat = Chat()
     await say(agent, chat, "发我")
-    assert chat.files == [agent_settings.agent_workdir / "shot.txt"]
+    assert chat.files == [(room / "诗.md").resolve()]
     results = [m["content"] for m in provider.bodies[1]["messages"] if m["role"] == "tool"]
-    assert results[0] == "已发送 shot.txt" and results[1].startswith("错误：文件不存在")
+    assert results[0] == "已发送 诗.md" and results[1].startswith("错误：没有这个文件")
+    assert results[2] == results[3] == "错误：只能用房间里的路径"
 
 
 async def test_outgoing_text_redacts_configured_secrets(make_agent):
@@ -307,41 +329,114 @@ async def test_outgoing_text_redacts_configured_secrets(make_agent):
     assert chat.sent == ["key is [REDACTED]"]
 
 
-def test_file_tools_read_write_edit_relative_to_workdir(tmp_path):
-    tools = HostTools(tmp_path)
-    assert "已写入" in tools.write_file("sub/a.txt", "one\ntwo\ntwo\n")
-    assert (tmp_path / "sub/a.txt").read_text() == "one\ntwo\ntwo\n"
-    assert tools.read_file("sub/a.txt") == "1\tone\n2\ttwo\n3\ttwo"
-    assert tools.read_file("sub/a.txt", offset=2, limit=1).startswith("2\ttwo\n[还有 1 行")
-    with pytest.raises(ToolError, match="2 处"):
-        tools.edit_file("sub/a.txt", "two", "2")
-    tools.edit_file("sub/a.txt", "two", "2", replace_all=True)
-    assert (tmp_path / "sub/a.txt").read_text() == "one\n2\n2\n"
-    with pytest.raises(ToolError, match="没有找到"):
-        tools.edit_file("sub/a.txt", "zzz", "y")
+def test_room_is_hers_and_nothing_outside_it_is_reachable(tmp_path):
+    room = Room(tmp_path / "room", tmp_path / "stickers")
+    assert room.list() == "房间还是空的"
+    assert room.write("诗/秋天.md", "叶子落了") == "写好了：诗/秋天.md"
+    room.write("诗/秋天.md", "\n风也凉了", append=True)
+    assert room.read("诗/秋天.md") == "叶子落了\n风也凉了"
+    assert room.list() == "诗/\n诗/秋天.md（25 字节）"
+    for bad in ("../x.md", "..\\..\\x.md", "C:\\Windows\\win.ini", "诗/../../x.md", ""):
+        with pytest.raises(ToolError):
+            room.write(bad, "x")
+    room.write("/etc/passwd", "x")  # A leading slash means the top of her room.
+    assert (tmp_path / "room/etc/passwd").is_file()
+    with pytest.raises(ToolError, match="文件夹"):
+        room.write("诗", "x")
+    (tmp_path / "room" / "猫.png").write_bytes(PNG)
+    assert "view_image" in room.read("猫.png")
 
 
-def test_edit_preserves_crlf_files(tmp_path):
-    path = tmp_path / "win.txt"
-    path.write_bytes(b"a\r\nb\r\nc\r\n")
-    HostTools(tmp_path).edit_file(str(path), "a\nb", "a\nB")
-    assert path.read_bytes() == b"a\r\nB\r\nc\r\n"
-
-
-async def test_powershell_timeout_and_cwd(tmp_path):
-    tools = HostTools(tmp_path)
-    (tmp_path / "inner").mkdir()
-    output = await tools.powershell("(Get-Location).Path", "inner")
-    assert output.endswith(str(tmp_path / "inner"))
-    assert "超时" in await tools.powershell("Start-Sleep -Seconds 30", None, 1)
-    with pytest.raises(ToolError):
-        await tools.powershell("dir", "missing-dir")
-    await tools.close()
+def test_diary_is_dated_and_can_be_read_back(tmp_path):
+    room = Room(tmp_path / "room", tmp_path / "stickers")
+    assert room.read_diary("", datetime(2026, 10, 26, 9)) == "还没写过日记"
+    room.write_diary("今天下雨，有点想他", datetime(2026, 10, 25, 22, 10))
+    room.write_diary("收了一张猫的图", datetime(2026, 10, 26, 1, 5))
+    recent = room.read_diary(None, datetime(2026, 10, 26, 9))
+    assert recent == "## 2026-10-25 22:10\n今天下雨，有点想他\n## 2026-10-26 01:05\n收了一张猫的图"
+    assert room.read_diary("2026-10-25", datetime(2026, 10, 26)) == (
+        "## 2026-10-25 22:10\n今天下雨，有点想他"
+    )
+    assert room.read_diary("2026-09", datetime(2026, 10, 26)) == "2026-09 没写日记"
+    assert (tmp_path / "room/diary/2026-10.md").is_file()
 
 
 def test_describe_call_is_single_line_and_bounded():
-    text = describe_call("powershell", {"command": "a\n`b`\n" + "x" * 300})
+    text = describe_call("group_post", {"text": "a\n`b`\n" + "x" * 300})
     assert "\n" not in text and "`b`" not in text and len(text) < 200
+
+
+def test_a_reply_becomes_separate_texts_and_stickers():
+    assert texts("哼\n\n才不是\n[表情包：震惊]\n\n算了") == [
+        ("text", "哼"),
+        ("text", "才不是"),
+        ("sticker", "震惊"),
+        ("text", "算了"),
+    ]
+    assert texts("[表情包: 我不知道耶]") == [("sticker", "我不知道耶")]
+    listing = "要带的：\n\n- 水\n- 伞"
+    assert texts(listing) == [("text", listing)]  # Lists stay in one message.
+    assert texts("第一行\n第二行") == [("text", "第一行\n第二行")]
+
+
+async def test_replies_go_out_as_texts_with_stickers(make_agent, agent_settings):
+    stickers = agent_settings.social_sticker_dir
+    stickers.mkdir(parents=True, exist_ok=True)
+    (stickers / "shock.png").write_bytes(PNG)
+    (stickers / "stickers.json").write_text(
+        json.dumps([{"name": "震惊", "file": "shock.png", "when": "吓一跳"}], ensure_ascii=False),
+        encoding="utf-8",
+    )
+    provider = Provider(completion("啊？\n\n[表情包：震惊]\n\n你说真的？\n[表情包：没有这张]"))
+    agent = await make_agent(provider)
+    chat = Chat()
+    await say(agent, chat, "我中奖了")
+    assert chat.sent == ["啊？", "你说真的？"] and chat.files == [stickers / "shock.png"]
+    system = provider.bodies[0]["messages"][0]["content"]
+    assert system.endswith("<stickers>\n- 震惊：吓一跳\n</stickers>")
+
+
+async def test_saving_a_picture_and_making_it_a_sticker(make_agent, agent_settings):
+    provider = Provider(
+        completion(
+            "",
+            [
+                (
+                    "save_picture",
+                    {
+                        "source": "https://img.example/cat.png",
+                        "name": "趴着的猫",
+                        "sticker": True,
+                        "when": "犯懒",
+                    },
+                ),
+                ("save_picture", {"source": "https://img.example/x", "name": "坏图"}),
+            ],
+        ),
+        completion("存好啦"),
+    )
+    agent = await make_agent(provider)
+    fetched = []
+
+    async def download(url):
+        fetched.append(url)
+        return PNG if url.endswith(".png") else b"<html>"
+
+    agent.download = download
+    await say(agent, Chat(), "这只猫好可爱")
+    results = [m["content"] for m in provider.bodies[1]["messages"] if m["role"] == "tool"]
+    assert results[0] == "存好了：pictures/趴着的猫.png，也加进表情包了（趴着的猫）"
+    assert results[1].startswith("错误：这不是")
+    room = agent_settings.agent_room_dir
+    assert (room / "pictures/趴着的猫.png").read_bytes() == PNG
+    found = agent.stickers.find("趴着的猫")
+    assert found["when"] == "犯懒" and found["path"].read_bytes() == PNG
+
+
+async def test_downloads_never_reach_this_computer_or_the_local_network():
+    for url in ("http://127.0.0.1/a.png", "http://localhost/a.png", "file:///C:/a.png"):
+        with pytest.raises(ToolError):
+            await download_image(url)
 
 
 def test_fit_drops_oldest_turns_and_starts_with_user():
@@ -374,15 +469,14 @@ def test_agent_settings_from_env(tmp_path):
         "ALLOWED_CHANNEL_IDS": "100",
         "PERSONAL_MODE_ENABLED": "true",
         "OWNER_DISCORD_USER_ID": "20",
-        "AGENT_WORKDIR": str(tmp_path),
+        "AGENT_ROOM_DIR": str(tmp_path / "room"),
     }
     settings = Settings.from_env(
         {**base, "AGENT_MODEL": "deepseek-pro", "AGENT_THINKING": "false", "AGENT_MAX_STEPS": "5"}
     )
-    assert settings.agent_workdir == tmp_path and settings.agent_model == "deepseek-pro"
+    assert settings.agent_room_dir == tmp_path / "room" and settings.agent_model == "deepseek-pro"
     assert not settings.agent_thinking and settings.agent_max_steps == 5
-    with pytest.raises(ConfigurationError, match="AGENT_WORKDIR"):
-        Settings.from_env({**base, "AGENT_WORKDIR": str(tmp_path / "missing")})
+    assert Settings.from_env({**base, "AGENT_ROOM_DIR": ""}).agent_room_dir == Path("data/room")
     with pytest.raises(ConfigurationError, match="AGENT_REASONING_EFFORT"):
         Settings.from_env({**base, "AGENT_REASONING_EFFORT": "huge"})
 
@@ -406,35 +500,6 @@ async def test_discord_routes_owner_dm_with_attachment_links(agent_settings, sto
     assert call["owner_id"] == OWNER and call["channel_id"] == CHANNEL
     assert call["content"] == "看看这个\n[附件 a.png: https://cdn.example/a.png]"
     assert call["chat"].channel is channel
-
-
-async def test_shell_keeps_location_variables_and_functions(tmp_path):
-    (tmp_path / "sub").mkdir()
-    tools = HostTools(tmp_path)
-    try:
-        await tools.powershell("$x = 7; function hi { 'hello' }; Set-Location sub")
-        output = await tools.powershell("$x; hi; (Get-Location).Path")
-        assert output.splitlines() == ["exit_code=0", "7", "hello", str(tmp_path / "sub")]
-        # cwd applies to one call only.
-        once = await tools.powershell("(Get-Location).Path", str(tmp_path))
-        assert once.endswith(str(tmp_path))
-        assert (await tools.powershell("(Get-Location).Path")).endswith(str(tmp_path / "sub"))
-        assert await tools.powershell("cmd /c exit 4") == "exit_code=4"
-        assert "Exception: boom" in await tools.powershell("throw 'boom'")
-        await tools.reset_shell()
-        assert await tools.powershell("$x") == "exit_code=0"
-        assert "shell 已退出" in await tools.powershell("exit 3")
-        assert await tools.powershell("Write-Output '中文'") == "exit_code=0\n中文"
-    finally:
-        await tools.close()
-
-
-async def test_new_conversation_resets_shell(make_agent):
-    agent = await make_agent(Provider())
-    await agent.tools.powershell("$keep = 1")
-    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!new", chat=Chat())
-    assert agent.tools.process is None
-    assert await agent.tools.powershell("$keep") == "exit_code=0"
 
 
 async def test_system_prompt_is_constant_and_messages_carry_time(make_agent):
@@ -490,7 +555,7 @@ def tool_delta(**fields):
 
 async def test_monitor_streams_thinking_text_and_tools(make_agent):
     usage = {"prompt_tokens": 10, "completion_tokens": 5, "prompt_cache_hit_tokens": 8}
-    first_part = {"name": "read_file", "arguments": '{"pa'}
+    first_part = {"name": "room_read", "arguments": '{"pa'}
     responses = [
         sse_response(
             chunk({"reasoning_content": "先看"}),
@@ -517,7 +582,7 @@ async def test_monitor_streams_thinking_text_and_tools(make_agent):
     assert bodies[0]["stream"] is True
     assistant = bodies[1]["messages"][-2]
     call = assistant["tool_calls"][0]["function"]
-    assert call == {"name": "read_file", "arguments": '{"path": "x"}'}
+    assert call == {"name": "room_read", "arguments": '{"path": "x"}'}
     assert assistant["reasoning_content"] == "先看文件"
     events = agent.observer.sink.events
 
@@ -550,27 +615,6 @@ async def test_restart_command_requires_supervisor(make_agent):
     agent.restarter = AsyncMock()
     await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!restart", chat=chat)
     agent.restarter.assert_awaited_once_with(CHANNEL)
-
-
-async def test_restart_tool_finishes_step_then_restarts(make_agent, store):
-    provider = Provider(completion("改好了", [("restart_bot", {})]), completion("不该到这里"))
-    agent = await make_agent(provider)
-    agent.restarter = AsyncMock()
-    await say(agent, Chat(), "改完重启")
-    await agent.restart_task
-    agent.restarter.assert_awaited_once_with(CHANNEL)
-    assert len(provider.bodies) == 1
-    assert "restart_bot" in {t["function"]["name"] for t in provider.bodies[0]["tools"]}
-    history = await store.load(CHANNEL)
-    assert history[-1]["role"] == "tool" and "重启" in history[-1]["content"]
-
-
-async def test_restart_tool_hidden_without_supervisor(make_agent):
-    provider = Provider(completion("好"))
-    agent = await make_agent(provider)
-    await say(agent, Chat(), "hi")
-    assert "restart_bot" not in {t["function"]["name"] for t in provider.bodies[0]["tools"]}
-    assert "restart_bot" not in provider.bodies[0]["messages"][0]["content"]
 
 
 async def test_bot_restart_marker_round_trip(agent_settings, storage, policy):
@@ -621,13 +665,15 @@ async def test_memory_is_loaded_once_per_conversation(make_agent, agent_settings
     chat = Chat()
     await say(agent, chat, "a")
     assert "<memory>\n（还是空的）\n</memory>" in provider.bodies[0]["messages"][0]["content"]
-    assert str(agent_settings.agent_memory_path) in provider.bodies[0]["messages"][0]["content"]
-    agent_settings.agent_memory_path.write_text("- 老爹喜欢简短回复\n", encoding="utf-8")
+    agent_settings.agent_memory_path.write_text(
+        "- 老爹喜欢简短回复\n\n## 做事备忘\n- python 在 D:\\Dev\n", encoding="utf-8"
+    )
     await say(agent, chat, "b")
     # Unchanged within the conversation, so the cached prefix stays valid.
     assert provider.bodies[1]["messages"][0] == provider.bodies[0]["messages"][0]
     await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!new", chat=chat)
     await say(agent, chat, "c")
+    # The old work notes are not hers to act on any more.
     assert "<memory>\n- 老爹喜欢简短回复\n</memory>" in provider.bodies[2]["messages"][0]["content"]
     assert "<group_memory>" not in provider.bodies[2]["messages"][0]["content"]
 
@@ -971,14 +1017,15 @@ async def test_owner_images_are_shown_and_kept_as_file_references(make_agent, st
 
 
 async def test_view_image_shows_a_copy_after_the_tool_result(make_agent, agent_settings, store):
-    shot = agent_settings.agent_workdir / "shot.png"
+    shot = agent_settings.agent_room_dir / "pictures" / "shot.png"
+    shot.parent.mkdir(parents=True)
     shot.write_bytes(PNG)
     provider = Provider(
-        completion("", [("view_image", {"path": "shot.png"})]),
-        completion("屏幕上是个白框"),
+        completion("", [("view_image", {"path": "pictures/shot.png"})]),
+        completion("是只白猫"),
     )
     agent = await make_agent(provider)
-    await say(agent, Chat(), "截个图看看")
+    await say(agent, Chat(), "你存的那张图是啥")
     shot.write_bytes(b"overwritten")
     roles = [m["role"] for m in provider.bodies[1]["messages"][1:]]
     assert roles == ["user", "assistant", "tool", "user"]
@@ -989,12 +1036,30 @@ async def test_view_image_shows_a_copy_after_the_tool_result(make_agent, agent_s
     assert copy != str(shot) and Path(copy).read_bytes() == PNG  # noqa: ASYNC240
 
 
-async def test_view_image_rejects_non_images(make_agent, agent_settings):
-    (agent_settings.agent_workdir / "a.txt").write_text("hi", encoding="utf-8")
-    provider = Provider(completion("", [("view_image", {"path": "a.txt"})]), completion("哦"))
+async def test_view_image_rejects_non_images_and_other_folders(make_agent, agent_settings):
+    agent_settings.agent_room_dir.mkdir()
+    (agent_settings.agent_room_dir / "a.txt").write_text("hi", encoding="utf-8")
+    outside = agent_settings.personal_database_path.parent / "b.png"
+    outside.write_bytes(PNG)
+    sent = agent_settings.personal_database_path.parent / "dm_images" / "from-him.png"
+    sent.parent.mkdir()
+    sent.write_bytes(PNG)
+    provider = Provider(
+        completion(
+            "",
+            [
+                ("view_image", {"path": "a.txt"}),
+                ("view_image", {"path": str(outside)}),
+                ("view_image", {"path": str(sent)}),
+            ],
+        ),
+        completion("哦"),
+    )
     agent = await make_agent(provider)
     await say(agent, Chat(), "看看")
-    assert "不是 PNG" in provider.bodies[1]["messages"][-1]["content"]
+    results = [m["content"] for m in provider.bodies[1]["messages"] if m["role"] == "tool"]
+    assert "不是 PNG" in results[0] and results[1] == "错误：只能用房间里的路径"
+    assert results[2] == "图片会在这一步之后附给你看"  # Pictures he sent her are fine.
 
 
 class FakeWeb:
@@ -1069,16 +1134,20 @@ async def setup(make_agent, provider, **overrides):
     return agent, initiative, clock, sent
 
 
-async def test_reaches_out_after_a_quiet_spell_once_until_answered(make_agent, monkeypatch):
+async def test_reaches_out_after_a_quiet_spell_and_waits_longer_unanswered(make_agent):
     provider = Provider(
         completion("晚安"),
         completion(json.dumps({"message": "爬山那天下雨了吗"}, ensure_ascii=False)),
+        completion(json.dumps({"message": "睡着啦？"}, ensure_ascii=False)),
         completion("没下就好"),
     )
     agent, initiative, clock, sent = await setup(make_agent, provider)
     await say(agent, Chat(), "周末去爬山")
     assert not await initiative.consider()  # Just talked.
-    clock.t = agent_last = (await agent.store.last_message_at(CHANNEL)) + 4 * HOUR
+    last = await agent.store.last_message_at(CHANNEL)
+    clock.t = last + 25 * 60
+    assert not await initiative.consider()  # Less than 30 minutes.
+    clock.t = first = last + 4 * HOUR
     assert await initiative.consider()
     assert sent == ["爬山那天下雨了吗"]
     ask = provider.bodies[1]
@@ -1086,25 +1155,31 @@ async def test_reaches_out_after_a_quiet_spell_once_until_answered(make_agent, m
     nudge = ask["messages"][-1]["content"]
     assert nudge.startswith("[宿主] 这不是老爹发的消息") and "4 小时" in nudge
     assert ask["messages"][0] == provider.bodies[0]["messages"][0]  # Same cached prefix.
-    # Unanswered: no second message however long the silence.
-    clock.t = agent_last + 30 * HOUR
+    # Unanswered: no limit on how many, but the gap doubles (30 min -> 1 h).
+    clock.t = first + 45 * 60
     assert not await initiative.consider() and len(provider.bodies) == 2
+    clock.t = first + HOUR
+    assert await initiative.consider() and sent[-1] == "睡着啦？"
+    assert "爬山那天下雨了吗" in provider.bodies[2]["messages"][-1]["content"]  # She sees it.
+    clock.t += HOUR + 60
+    assert not await initiative.consider()  # Two unanswered: now 2 h.
     await say(agent, Chat(), "没下")
-    user = provider.bodies[2]["messages"][-1]["content"]
-    assert user.startswith(SELF_TAG) and "爬山那天下雨了吗" in user
+    user = provider.bodies[3]["messages"][-1]["content"]
+    assert user.startswith(SELF_TAG) and "爬山那天下雨了吗" in user and "睡着啦？" in user
+    assert initiative.gap(0) == 30 * 60 and initiative.gap(20) == 8 * HOUR
 
 
 async def test_declines_quietly_and_respects_limits(make_agent):
     provider = Provider(completion("嗯"), completion('{"message": null}'))
-    agent, initiative, clock, sent = await setup(make_agent, provider)
+    agent, initiative, clock, sent = await setup(make_agent, provider, agent_initiative_per_day=3)
     await say(agent, Chat(), "hi")
     clock.t += 5 * HOUR
     assert not await initiative.consider() and sent == [] and len(provider.bodies) == 2
-    # At most one look an hour.
+    # After passing, the next look waits the same 30 minutes.
     clock.t += 600
     assert not await initiative.consider() and len(provider.bodies) == 2
     clock.t += HOUR
-    initiative.sent = [clock.t - 60] * agent.settings.agent_initiative_per_day
+    initiative.sent = [clock.t - 2 * HOUR] * 3  # The optional daily cap.
     assert not await initiative.consider() and len(provider.bodies) == 2
     initiative.sent = []
     initiative.set_enabled(False)
@@ -1132,7 +1207,7 @@ async def test_proactive_command_and_status(make_agent):
     await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!proactive off", chat=chat)
     assert "关着" in chat.sent[-1] and not initiative.enabled
     await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!proactive on", chat=chat)
-    assert chat.sent[-1].startswith("主动找你：开着 · 过去 24 小时 0/3 次")
+    assert chat.sent[-1].startswith("主动找你：开着 · 过去 24 小时 0 次 · 间隔至少 30 分钟")
     await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!proactive x", chat=chat)
     assert "用法" in chat.sent[-1]
     await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!status", chat=chat)
@@ -1207,7 +1282,8 @@ def test_compact_tokens_setting_accepts_zero_but_not_tiny_values():
 
 
 async def test_dm_side_updates_status_and_profile(make_agent, agent_settings):
-    image = agent_settings.agent_workdir / "new-avatar.png"
+    agent_settings.agent_room_dir.mkdir()
+    image = (agent_settings.agent_room_dir / "new-avatar.png").resolve()
     image.write_bytes(PNG)
     provider = Provider(
         completion(
@@ -1284,10 +1360,26 @@ async def test_group_events_are_not_remembered_as_his_words(make_agent):
     await agent.group.close()
 
 
-async def test_no_reaching_out_while_a_group_side_dm_is_unanswered(make_agent):
-    provider = Provider(completion("嗯"))
+async def test_an_unanswered_group_side_dm_doubles_the_gap(make_agent):
+    provider = Provider(completion("嗯"), completion('{"message": null}'))
     agent, initiative, clock, sent = await setup(make_agent, provider)
     await say(agent, Chat(), "hi")
     await agent.note_outgoing(CHANNEL, "群里的事", "group")
-    clock.t += 5 * HOUR
+    last = await agent.store.last_message_at(CHANNEL)
+    clock.t = last + 45 * 60
     assert not await initiative.consider() and len(provider.bodies) == 1
+    clock.t = last + HOUR + 60
+    assert not await initiative.consider() and len(provider.bodies) == 2
+    assert "群里的事" in provider.bodies[1]["messages"][-1]["content"]
+
+
+async def test_a_quiet_look_may_leave_a_diary_entry(make_agent, agent_settings):
+    answer = json.dumps({"message": None, "diary": "他去上班了，有点无聊"}, ensure_ascii=False)
+    provider = Provider(completion("嗯"), completion(answer))
+    agent, initiative, clock, sent = await setup(make_agent, provider)
+    await say(agent, Chat(), "我去上班了")
+    clock.t += 2 * HOUR
+    assert not await initiative.consider() and sent == []
+    assert '"diary"' in provider.bodies[1]["messages"][-1]["content"]
+    diary = (agent_settings.agent_room_dir / "diary" / "2026-10.md").read_text(encoding="utf-8")
+    assert "## 2026-10-22 20:00\n他去上班了，有点无聊" in diary
