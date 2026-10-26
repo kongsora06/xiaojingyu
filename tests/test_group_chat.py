@@ -871,23 +871,20 @@ async def test_no_dm_to_owner_while_one_is_unanswered(make_group):
     assert provider.payload()["can_dm_owner"] is False and transport.owner_messages == []
 
 
-async def test_follow_ups_stop_after_she_chimed_in_twice_uncalled(make_group):
-    provider = Provider(plan(["嗯"]), plan(["对"]), plan(["哈"]), plan(["也热"]))
+async def test_follow_ups_keep_coming_while_she_is_in_the_conversation(make_group):
+    provider = Provider(plan(["嗯"]), plan(["对"]), plan(["哈"]))
     group = make_group(provider)
     group.observe(CHANNEL, line("@小鲸鱼 在吗"), mentioned=True)
     await settle(group)
     window = group.windows[CHANNEL]
-    assert group.observe(CHANNEL, line("今天好热")) == "followup"
-    await settle(group)
-    assert group.observe(CHANNEL, line("是啊")) == "followup"
-    await settle(group)
-    assert window.unprompted == 2
-    # Twice uncalled in a row: plain messages wait for the normal pace again.
-    assert group.trigger_for(window, line("热死了"), False) == "ambient"
+    # No cap on follow-ups in a row: she decides each time whether to answer.
+    for text in ("今天好热", "是啊"):
+        assert group.observe(CHANNEL, line(text)) == "followup"
+        await settle(group)
+    assert group.trigger_for(window, line("热死了"), False) == "followup"
     assert group.trigger_for(window, line("小鲸鱼你热吗"), False) == "called"
-    group.observe(CHANNEL, line("@小鲸鱼 你呢"), mentioned=True)
-    await settle(group)
-    assert window.unprompted == 0 and group.trigger_for(window, line("哦"), False) == "followup"
+    window.last_bot_at -= group_chat.ENGAGED_SECONDS
+    assert group.trigger_for(window, line("哦"), False) == "ambient"
 
 
 async def test_with_thinking_the_plan_is_plain_json_and_may_be_fenced(make_group):
