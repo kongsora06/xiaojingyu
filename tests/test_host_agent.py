@@ -1137,8 +1137,8 @@ async def setup(make_agent, provider, **overrides):
 async def test_reaches_out_after_a_quiet_spell_and_waits_longer_unanswered(make_agent):
     provider = Provider(
         completion("晚安"),
-        completion(json.dumps({"message": "爬山那天下雨了吗"}, ensure_ascii=False)),
-        completion(json.dumps({"message": "睡着啦？"}, ensure_ascii=False)),
+        completion("爬山那天下雨了吗"),
+        completion("睡着啦？"),
         completion("没下就好"),
     )
     agent, initiative, clock, sent = await setup(make_agent, provider)
@@ -1151,7 +1151,7 @@ async def test_reaches_out_after_a_quiet_spell_and_waits_longer_unanswered(make_
     assert await initiative.consider()
     assert sent == ["爬山那天下雨了吗"]
     ask = provider.bodies[1]
-    assert ask["response_format"] == {"type": "json_object"}
+    assert ask["tools"] == provider.bodies[0]["tools"]  # Same tools: the prefix is shared.
     nudge = ask["messages"][-1]["content"]
     assert nudge.startswith("[宿主] 这不是老爹发的消息") and "4 小时" in nudge
     assert ask["messages"][0] == provider.bodies[0]["messages"][0]  # Same cached prefix.
@@ -1170,7 +1170,7 @@ async def test_reaches_out_after_a_quiet_spell_and_waits_longer_unanswered(make_
 
 
 async def test_declines_quietly_and_respects_limits(make_agent):
-    provider = Provider(completion("嗯"), completion('{"message": null}'))
+    provider = Provider(completion("嗯"), completion("（不找他）"))
     agent, initiative, clock, sent = await setup(make_agent, provider, agent_initiative_per_day=3)
     await say(agent, Chat(), "hi")
     clock.t += 5 * HOUR
@@ -1361,7 +1361,7 @@ async def test_group_events_are_not_remembered_as_his_words(make_agent):
 
 
 async def test_an_unanswered_group_side_dm_doubles_the_gap(make_agent):
-    provider = Provider(completion("嗯"), completion('{"message": null}'))
+    provider = Provider(completion("嗯"), completion("（不找他）"))
     agent, initiative, clock, sent = await setup(make_agent, provider)
     await say(agent, Chat(), "hi")
     await agent.note_outgoing(CHANNEL, "群里的事", "group")
@@ -1373,13 +1373,40 @@ async def test_an_unanswered_group_side_dm_doubles_the_gap(make_agent):
     assert "群里的事" in provider.bodies[1]["messages"][-1]["content"]
 
 
-async def test_a_quiet_look_may_leave_a_diary_entry(make_agent, agent_settings):
-    answer = json.dumps({"message": None, "diary": "他去上班了，有点无聊"}, ensure_ascii=False)
-    provider = Provider(completion("嗯"), completion(answer))
+async def test_in_a_quiet_spell_she_does_her_own_things(make_agent, agent_settings):
+    provider = Provider(
+        completion("嗯"),
+        completion(
+            "",
+            [
+                ("write_diary", {"text": "他去上班了，有点无聊"}),
+                ("room_write", {"path": "诗/等.md", "content": "等一个人下班"}),
+                ("send_file", {"path": "诗/等.md"}),
+            ],
+        ),
+        completion("（不找他）"),
+        completion("回来啦"),
+    )
     agent, initiative, clock, sent = await setup(make_agent, provider)
-    await say(agent, Chat(), "我去上班了")
+    chat = Chat()
+    await say(agent, chat, "我去上班了")
     clock.t += 2 * HOUR
     assert not await initiative.consider() and sent == []
-    assert '"diary"' in provider.bodies[1]["messages"][-1]["content"]
-    diary = (agent_settings.agent_room_dir / "diary" / "2026-10.md").read_text(encoding="utf-8")
-    assert "## 2026-10-22 20:00\n他去上班了，有点无聊" in diary
+    look, after = provider.bodies[1], provider.bodies[2]
+    assert "这一会儿是你自己的时间" in look["messages"][-1]["content"]
+    assert look["tools"] == provider.bodies[0]["tools"]
+    results = [m["content"] for m in after["messages"] if m["role"] == "tool"]
+    assert results[:2] == ["写好了", "写好了：诗/等.md"] and results[2].startswith(
+        "错误：他现在不在"
+    )
+    room = agent_settings.agent_room_dir
+    (diary,) = (room / "diary").iterdir()
+    assert "他去上班了，有点无聊" in diary.read_text(encoding="utf-8")
+    assert (room / "诗/等.md").read_text(encoding="utf-8") == "等一个人下班"
+    assert chat.files == [] and not agent.outgoing  # Nothing reached him; nothing unanswered.
+    # The DM side learns what she did, with his next message.
+    await say(agent, chat, "我回来了")
+    user = provider.bodies[3]["messages"][-1]["content"]
+    assert user.startswith("[宿主记录] 你自己待着的时候")
+    assert "- 写了日记\n- 在房间里写了 诗/等.md" in user and user.endswith("] 我回来了")
+    assert not agent.activity

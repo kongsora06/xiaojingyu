@@ -1,7 +1,9 @@
-"""She messages the owner first: after a quiet spell, the model decides whether it has
-something it actually wants to say (its own news, a whim, wanting something, missing him,
-how his day went, a reminder he asked for). The same look may also leave a few lines in
-her diary.
+"""Her time while the owner is away: after a quiet spell she gets a while to herself.
+
+She may use her own things (diary, room, notebook, the web, saving pictures) as she likes,
+then decides whether she has something she actually wants to say to him (her own news, a
+whim, wanting something, missing him, how his day went, a reminder he asked for). What she
+did is told to the DM side with his next message; he does not see it.
 
 The host decides only *when* it may ask: never during quiet hours, never while a turn is
 running, and only after the gap since they last talked (AGENT_INITIATIVE_IDLE_MINUTES).
@@ -15,21 +17,31 @@ import json
 import logging
 import random
 import time
+from contextlib import nullcontext
 from datetime import datetime
 
 from openai import APIError
 
 from .config import parse_quiet_hours
 from .host_agent import fit, loads, request_messages, save_json
+from .host_tools import ToolError, what_she_did
+from .images import file_block
 
 log = logging.getLogger(__name__)
 CHECK_SECONDS = 600
 # The gap stops doubling here (unanswered messages).
 MAX_GAP_SECONDS = 8 * 3600
 WEEKDAYS = "一二三四五六日"
-NUDGE = """[宿主] 这不是老爹发的消息，是宿主在问你。现在是 {now}（周{weekday}）。
-老爹上次跟你说话是 {ago} 前。你过去 24 小时主动找过他 {count} 次。{pending}{group}
-你这会儿想找老爹吗？女儿给爸爸发消息，多半是因为自己这边有事，或者惦记着他：
+# Tool steps she may take on her own in one quiet spell.
+IDLE_STEPS = 8
+# Her last reply when she does not want to message him.
+SKIP = "（不找他）"
+NUDGE = """[宿主] 这不是老爹发的消息，是宿主在跟你说。现在是 {now}（周{weekday}）。
+老爹上次跟你说话是 {ago} 前，这会儿他不在。你过去 24 小时主动找过他 {count} 次。{pending}{group}
+这一会儿是你自己的时间。想做点什么就做：写几句日记、在房间里写点东西或者整理你的清单、
+上网逛逛感兴趣的东西、收张喜欢的图……想做才做，什么都不做、发会儿呆也行。
+没人看着，做了也不用跟谁报告。（send_file 这会儿用不了，想给他看的等他来了再发。）
+然后想想要不要找老爹。女儿给爸爸发消息，多半是因为自己这边有事，或者惦记着他：
 群里谁逗到你或者惹到你了、突然想到一件事、想要个什么、想让他评评理、闲得发慌、想他了，
 或者记着他那头的事（他说过几点下班、今天要干嘛），想知道后来怎样了。
 想发就照你这会儿的心情直接说，几个字、一句话、几句话都行；
@@ -37,9 +49,8 @@ NUDGE = """[宿主] 这不是老爹发的消息，是宿主在问你。现在是
 他说了去睡、在上班、在写作业，就别隔一阵戳他一次，等他差不多回来了再说。
 看看你前几次主动找他说的是什么，这次别又是同一种；没什么想说的就不发。
 他没回你，多半是在忙或者睡了；要不要再找他、说什么，你自己看着办。
-这会儿你也可以给自己写几句日记（今天怎么样、心情、在琢磨什么），想写才写，不写就是 null。
-只输出 JSON：{{"message": "要发的话或 null", "diary": "日记或 null"}}。
-用你平时私聊的口吻，别提到宿主。"""
+想找他，就把要发给他的话直接写出来作为你最后的回复，用你平时私聊的口吻，别提到宿主；
+不想找他，最后只回 {skip}。"""
 
 
 def in_quiet_hours(spec: str, moment: datetime) -> bool:
@@ -177,6 +188,7 @@ class Initiative:
         return True
 
     async def _ask(self, channel, idle, pending) -> str | None:
+        """Her quiet spell: she may do her own things, then returns what to send him."""
         agent = self.agent
         history = await agent.store.load(channel)
         system = await agent.system_message(channel)
@@ -195,36 +207,101 @@ class Initiative:
                 and (digest := agent.group.digest_since(agent.group_seen))
                 else ""
             ),
+            skip=SKIP,
         )
+        turn = [{"role": "user", "content": nudge}]
+        done: list[str] = []
+        text = None
+        try:
+            for _ in range(IDLE_STEPS):
+                worker = agent.workers.get(channel)
+                if worker is not None and not worker.done():
+                    return None  # He is back; the chat takes over.
+                message = await self._complete(system, [*history, *turn])
+                if message is None:
+                    return None
+                if not message.tool_calls:
+                    text = (message.content or "").strip()
+                    break
+                await self._use_tools(channel, message, turn, done)
+        finally:
+            if done:
+                await agent.note_activity(channel, done)
+        if not text or not text.replace(SKIP, "").strip(" 。.\n"):
+            return None
+        return agent.sanitize(text)[:1800]
+
+    async def _complete(self, system, conversation):
+        agent = self.agent
         messages = [
             system,
-            *request_messages(fit(history, self.settings.agent_context_chars)),
-            {"role": "user", "content": nudge},
+            *request_messages(fit(conversation, self.settings.agent_context_chars)),
         ]
         try:
             async with asyncio.timeout(180):
                 response = await agent.client.chat.completions.create(
                     model=self.settings.agent_model,
                     messages=messages,
-                    response_format={"type": "json_object"},
-                    max_tokens=1024,
+                    # The same tools as in the chat, so the cached prefix is shared.
+                    tools=agent.tool_specs(),
+                    max_tokens=2048,
                     extra_body={"thinking": {"type": "disabled"}},
                 )
         except (TimeoutError, APIError) as error:
             log.warning("Initiative request failed; error_type=%s", type(error).__name__)
             return None
-        content = (response.choices[0].message.content or "") if response.choices else ""
-        data = loads(content) or {}
-        diary = data.get("diary")
-        if isinstance(diary, str) and diary.strip():
-            try:
-                await asyncio.to_thread(agent.room.write_diary, diary[:4000], moment)
-            except OSError:
-                log.warning("Could not write the diary")
-        message = data.get("message")
-        if not isinstance(message, str) or not message.strip():
-            return None
-        return agent.sanitize(message.strip())[:1800]
+        return response.choices[0].message if response.choices else None
+
+    async def _use_tools(self, channel, message, turn, done) -> None:
+        agent = self.agent
+        calls = message.tool_calls
+        turn.append(
+            {
+                "role": "assistant",
+                "content": message.content or "",
+                "tool_calls": [
+                    {
+                        "id": call.id,
+                        "type": "function",
+                        "function": {
+                            "name": call.function.name,
+                            "arguments": call.function.arguments,
+                        },
+                    }
+                    for call in calls
+                ],
+            }
+        )
+        for call in calls:
+            name, raw = call.function.name, call.function.arguments
+            output = await agent._run_tool(name, raw, AwayChat(), channel)
+            turn.append({"role": "tool", "tool_call_id": call.id, "content": output})
+            if not output.startswith("错误") and (line := what_she_did(name, loads(raw) or {})):
+                done.append(line)
+        if viewed := agent.viewed.pop(channel, None):
+            names = "、".join(str(name) for name, _ in viewed)
+            turn.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": f"[宿主] view_image 打开的图片：{names}"},
+                        *(file_block(copy) for _, copy in viewed),
+                    ],
+                }
+            )
+
+
+class AwayChat:
+    """The DM while he is away: nothing reaches it except her final message."""
+
+    async def send(self, text) -> None:
+        pass
+
+    async def send_file(self, path) -> None:
+        raise ToolError("他现在不在，想给他看就等他来了再发")
+
+    def typing(self):
+        return nullcontext()
 
 
 SELF_TAG = "[宿主记录] 你主动"

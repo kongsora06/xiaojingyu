@@ -172,6 +172,8 @@ def host_rules(settings: Settings, *, group=False, web=False, profile=False) -> 
   不用把钟点念给他听，也别拿它当催他睡觉的由头。隔了好几天才来，想他、埋怨他都行。
 - 老爹安静一阵子后，你可能会主动找他说话；那样的消息会以 "[宿主记录] 你主动找老爹说了…"
   附在他下一条消息前面，是你自己说过的话，接着聊就行。
+  他不在的时候你也会自己待着，写写日记、在房间里弄点东西、上网逛逛；
+  "[宿主记录] 你自己待着的时候…" 记的就是那时候你做过的事，他没看到。
 - 他发来的图片会直接附在他的消息里给你看。
 你自己的东西（这些都是你随手做的事，做了不用跟他报告，也不用说"我记下了"）：
 - 小本子 remember：约好的事、到点要提醒他的、他特意让你记住的、你自己不想忘的，随手记一句。
@@ -245,6 +247,10 @@ class HostAgent:
         # Kept on disk: the owner may answer after a restart.
         self.outbox_path = settings.personal_database_path.parent / "dm_outbox.json"
         self.outgoing: dict[int, list[str]] = load_outbox(self.outbox_path)
+        # What she did on her own while he was away, for the DM side to know (not a message
+        # to him, so it never counts as unanswered).
+        self.activity_path = settings.personal_database_path.parent / "dm_activity.json"
+        self.activity: dict[int, list[str]] = load_outbox(self.activity_path)
         # Set by the app when she may message the owner first (initiative.Initiative).
         self.initiative = None
         # Set by the app: her Discord status and profile (profile.Profile).
@@ -464,7 +470,11 @@ class HostAgent:
             async with chat.typing():
                 while not self.closing:
                     if pending := self.inbox.pop(channel_id, None):
-                        pending = self._take_outgoing(channel_id) + pending
+                        pending = (
+                            self._take_activity(channel_id)
+                            + self._take_outgoing(channel_id)
+                            + pending
+                        )
                         if digest := self._group_digest():
                             pending.insert(0, f"[宿主记录] 上次私聊之后群里的动静：\n{digest}")
                         user = {"role": "user", "content": "\n\n".join(pending)}
@@ -541,6 +551,16 @@ class HostAgent:
             + self.memory_snapshot[channel_id],
         }
 
+    def tool_specs(self) -> list[dict]:
+        """Her tools; the same list on every request (and her quiet-time looks), for the cache."""
+        return (
+            TOOLS
+            + [VIEW_TOOL]
+            + (WEB_TOOLS if self.web is not None else [])
+            + ([GROUP_READ_TOOL, GROUP_TOOL] if self.group is not None else [])
+            + ([PROFILE_TOOL] if self.profile is not None else [])
+        )
+
     async def _complete(self, history, channel_id, usage, chat, publisher=None):
         settings = self.settings
         messages = [
@@ -555,11 +575,7 @@ class HostAgent:
                 response = await self.client.chat.completions.create(
                     model=settings.agent_model,
                     messages=messages,
-                    tools=TOOLS
-                    + [VIEW_TOOL]
-                    + (WEB_TOOLS if self.web is not None else [])
-                    + ([GROUP_READ_TOOL, GROUP_TOOL] if self.group is not None else [])
-                    + ([PROFILE_TOOL] if self.profile is not None else []),
+                    tools=self.tool_specs(),
                     max_tokens=8192,
                     extra_body={"thinking": {"type": "enabled" if thinking else "disabled"}},
                     stream=stream,
@@ -904,6 +920,20 @@ class HostAgent:
         notes = self.outgoing.pop(channel_id, [])
         if notes:
             save_outbox(self.outbox_path, self.outgoing)
+        return notes
+
+    async def note_activity(self, channel_id, done: list[str]) -> None:
+        """She spent a quiet spell on her own things; the DM side learns of it next time."""
+        stamp = datetime.now().astimezone().strftime("%m-%d %H:%M")
+        lines = "\n".join(f"- {item}" for item in done)
+        note = f"[宿主记录] 你自己待着的时候（{stamp}，老爹没看到）做了这些：\n{lines}"
+        self.activity.setdefault(channel_id, []).append(note)
+        await asyncio.to_thread(save_outbox, self.activity_path, self.activity)
+
+    def _take_activity(self, channel_id) -> list[str]:
+        notes = self.activity.pop(channel_id, [])
+        if notes:
+            save_outbox(self.activity_path, self.activity)
         return notes
 
     # ---- looking back over the chat ----------------------------------------------

@@ -494,6 +494,29 @@ def clip(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
     return f"{text[:half]}\n[... 省略 {len(text) - limit} 字符 ...]\n{text[-half:]}"
 
 
+def what_she_did(name: str, arguments: dict) -> str | None:
+    """A plain line about something she did on her own, for her later self."""
+    path = str(arguments.get("path") or "").strip()
+    if name == "write_diary":
+        return "写了日记"
+    if name == "room_write":
+        return f"在房间里写了 {path}"
+    if name == "save_picture":
+        picture = str(arguments.get("name") or "").strip()
+        return f"收了一张图「{picture}」" + ("，加进了表情包" if arguments.get("sticker") else "")
+    if name == "remember":
+        return f"在小本子上记了：{str(arguments.get('text') or '').strip()[:80]}"
+    if name == "web_search":
+        return f"上网搜了「{str(arguments.get('query') or '').strip()[:40]}」"
+    if name == "web_fetch":
+        return f"看了网页 {str(arguments.get('url') or '').strip()[:120]}"
+    if name == "group_post":
+        return f"在群里说了：{str(arguments.get('text') or '').strip()[:80]}"
+    if name == "update_profile":
+        return f"改了自己的{arguments.get('field', '')}"
+    return None  # Just looking around (reading, listing, viewing) is not worth a line.
+
+
 def describe_call(name: str, arguments: dict) -> str:
     """One-line human summary of a tool call for the monitor and the DM trail."""
     if name == "group_post":
