@@ -869,3 +869,35 @@ async def test_no_dm_to_owner_while_one_is_unanswered(make_group):
     group.observe(CHANNEL, line("@小鲸鱼"), mentioned=True)
     await settle(group)
     assert provider.payload()["can_dm_owner"] is False and transport.owner_messages == []
+
+
+async def test_follow_ups_stop_after_she_chimed_in_twice_uncalled(make_group):
+    provider = Provider(plan(["嗯"]), plan(["对"]), plan(["哈"]), plan(["也热"]))
+    group = make_group(provider)
+    group.observe(CHANNEL, line("@小鲸鱼 在吗"), mentioned=True)
+    await settle(group)
+    window = group.windows[CHANNEL]
+    assert group.observe(CHANNEL, line("今天好热")) == "followup"
+    await settle(group)
+    assert group.observe(CHANNEL, line("是啊")) == "followup"
+    await settle(group)
+    assert window.unprompted == 2
+    # Twice uncalled in a row: plain messages wait for the normal pace again.
+    assert group.trigger_for(window, line("热死了"), False) == "ambient"
+    assert group.trigger_for(window, line("小鲸鱼你热吗"), False) == "called"
+    group.observe(CHANNEL, line("@小鲸鱼 你呢"), mentioned=True)
+    await settle(group)
+    assert window.unprompted == 0 and group.trigger_for(window, line("哦"), False) == "followup"
+
+
+async def test_with_thinking_the_plan_is_plain_json_and_may_be_fenced(make_group):
+    fenced = "```json\n" + json.dumps(plan(["好啊"]), ensure_ascii=False) + "\n```"
+    provider = Provider(fenced)
+    transport = Transport()
+    group = make_group(provider, transport, social_thinking=True)
+    group.observe(CHANNEL, line("@小鲸鱼 吃火锅不"), mentioned=True)
+    await settle(group)
+    body = provider.bodies[0]
+    assert body["thinking"] == {"type": "enabled"} and "response_format" not in body
+    assert [text for _, text, _ in transport.sent] == ["好啊"]
+    assert parse_plan("好的：" + json.dumps(plan(["嗯"])) + " 就这样", []).messages == ("嗯",)
