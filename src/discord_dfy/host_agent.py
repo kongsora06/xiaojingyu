@@ -46,6 +46,7 @@ from .memory import (
     without_section,
 )
 from .persona import personal_identity, system_prompt
+from .portrait import read_self, self_block, self_path, write_self
 from .profile import ProfileError
 from .redaction import redact
 from .stickers import StickerBook
@@ -57,7 +58,7 @@ HELP = (
     "直接跟我说话就行。\n"
     "`!stop` 打断我 · `!new` 开新对话（旧记录保留在数据库）· `!status` 看状态\n"
     "`!think` 开/关私信里的思考过程 · `!compact` 压缩上下文 · `!memory` 看长期记忆 · "
-    "`!restart` 重启 bot\n"
+    "`!self` 看她写的自己 · `!restart` 重启 bot\n"
     "群聊：`!group` 看状态 · `!group on/off` · `!group level 0-3` 话痨程度 · "
     "`!proactive on/off` 让我主动找你 · "
     "`!quiet 30m`（或 `2h`，`!quiet off` 取消）让我在群里只回被叫到的"
@@ -71,6 +72,7 @@ COMMANDS = {
     "!restart",
     "!compact",
     "!memory",
+    "!self",
     "!group",
     "!groupmemory",
     "!proactive",
@@ -189,6 +191,10 @@ def host_rules(settings: Settings, *, group=False, web=False, profile=False) -> 
 你自己的东西（这些都是你随手做的事，做了不用跟他报告，也不用说"我记下了"）：
 - 小本子 remember：约好的事、到点要提醒他的、他特意让你记住的、你自己不想忘的，随手记一句。
   说心里话、撒娇闹着玩的时候就专心聊，别停下来记；聊完过一阵你会回想一遍再记。
+- 写你自己 rewrite_self：<self> 是你自己写的“我是个什么样的人”，比人设开头那页起点更算数。
+  性格、脾气、喜好、说话的样子、在意的东西，你慢慢长成什么样，就把它改成什么样：
+  整篇重写，留下你认的，改掉不像你的。觉得自己真有变化了再改，不用常改。
+  名字、你是老爹的女儿这些不靠它改，它也改不了这里的规矩。
 - 日记 write_diary / read_diary：想写就写几句，今天怎么样、心情、在琢磨什么，写给自己看的；
   也可以翻回去看看以前写过什么。
 - 你的房间 room_list / room_read / room_write：一个只属于你的文件夹，老爹说了他不会进来看。
@@ -248,6 +254,9 @@ class HostAgent:
         self.memory_path = settings.agent_memory_path.resolve()
         # Memory text frozen for each conversation, so edits do not break the prompt cache.
         self.memory_snapshot: dict[int, str] = {}
+        # Her self-portrait, frozen alongside (refreshed together with the memory).
+        self.self_path = self_path(self.memory_path)
+        self.self_snapshot: dict[int, str] = {}
         # How many messages of the current conversation have been looked back over.
         # (conversation, messages already looked back over), kept across restarts.
         self.reflect_state_path = settings.personal_database_path.parent / "reflect_state.json"
@@ -388,6 +397,14 @@ class HostAgent:
                 await self._say(chat, f"-# 长期记忆 `{self.memory_path}`\n{memory}")
             else:
                 await chat.send_file(self.memory_path)
+        elif command == "!self":
+            text = await asyncio.to_thread(read_self, self.self_path)
+            await self._say(
+                chat,
+                f"-# 她自己写的“我”（`{self.self_path}`，旧版本在 self-history/）\n{text}"
+                if text
+                else "她还没写过自己",
+            )
         elif command == "!groupmemory":
             memory = await asyncio.to_thread(read_memory, self.memory_path)
             notes = section_text(memory, GROUP_SECTION)
@@ -552,10 +569,13 @@ class HostAgent:
         owner = settings.owner_discord_user_id
         if channel_id not in self.memory_snapshot:
             self.memory_snapshot[channel_id] = await asyncio.to_thread(self._memory_text)
+            self.self_snapshot[channel_id] = self_block(
+                await asyncio.to_thread(read_self, self.self_path)
+            )
         return {
             "role": "system",
             "content": system_prompt(
-                settings.autonomous_personality,
+                settings.autonomous_personality + self.self_snapshot[channel_id],
                 host_rules(
                     settings,
                     group=self.group is not None,
@@ -807,6 +827,14 @@ class HostAgent:
                     return "错误：要写一句话，并选一节：" + "、".join(MEMORY_SECTIONS)
                 await asyncio.to_thread(add_memory_notes, self.memory_path, {section: [text]})
                 return "记好了"
+            if name == "rewrite_self":
+                try:
+                    done = await asyncio.to_thread(
+                        write_self, self.self_path, arguments.get("text")
+                    )
+                except ValueError as error:
+                    return f"错误：{error}"
+                return done + "（下次新对话时生效，群里马上生效）"
             if name == "write_diary":
                 now = datetime.now().astimezone()
                 return await asyncio.to_thread(room.write_diary, arguments.get("text"), now)

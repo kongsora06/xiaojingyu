@@ -45,6 +45,7 @@ from .memory import (
     without_section,
 )
 from .persona import system_prompt
+from .portrait import read_self, self_block, self_path
 from .redaction import redact
 from .stickers import StickerBook
 from .streaming import collect_stream
@@ -295,6 +296,7 @@ class GroupChat:
         self.controls = Controls.load(settings.social_state_path, settings.social_level)
         self.windows: dict[int, Window] = {}
         self.memory_path = settings.agent_memory_path
+        self.self_path = self_path(settings.agent_memory_path)
         self.stickers = StickerBook(settings.social_sticker_dir)
         # Set by the app: her Discord status (profile.Profile).
         self.profile = None
@@ -659,7 +661,7 @@ class GroupChat:
         }
         system = (
             system_prompt(
-                settings.autonomous_personality,
+                settings.autonomous_personality + self_block(read_self(self.self_path)),
                 GROUP_RULES.format(guild=guild or "这个", channel=channel or "这个"),
                 identity,
             )
