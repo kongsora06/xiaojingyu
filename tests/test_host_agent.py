@@ -1410,3 +1410,27 @@ async def test_in_a_quiet_spell_she_does_her_own_things(make_agent, agent_settin
     assert user.startswith("[宿主记录] 你自己待着的时候")
     assert "- 写了日记\n- 在房间里写了 诗/等.md" in user and user.endswith("] 我回来了")
     assert not agent.activity
+
+
+async def test_she_lets_him_finish_typing_before_answering(make_agent, monkeypatch):
+    monkeypatch.setattr(host_agent, "TYPING_POLL", 0.01)
+    provider = Provider(completion("真的假的"))
+    agent = await make_agent(provider)
+    chat = Chat()
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="我跟你说", chat=chat)
+    agent.note_typing(CHANNEL)  # He keeps typing.
+    await asyncio.sleep(0.1)
+    assert provider.bodies == [] and chat.sent == []
+    await say(agent, chat, "今天中奖了")
+    user = provider.bodies[0]["messages"][-1]["content"]
+    assert "我跟你说" in user and user.endswith("今天中奖了")
+    assert chat.sent == ["真的假的"]
+
+
+async def test_no_reaching_out_while_he_is_typing(make_agent):
+    provider = Provider(completion("嗯"))
+    agent, initiative, clock, sent = await setup(make_agent, provider)
+    await say(agent, Chat(), "hi")
+    clock.t += 5 * HOUR
+    agent.note_typing(CHANNEL)
+    assert not await initiative.consider() and len(provider.bodies) == 1

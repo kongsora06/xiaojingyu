@@ -901,3 +901,24 @@ async def test_with_thinking_the_plan_is_plain_json_and_may_be_fenced(make_group
     assert body["thinking"] == {"type": "enabled"} and "response_format" not in body
     assert [text for _, text, _ in transport.sent] == ["好啊"]
     assert parse_plan("好的：" + json.dumps(plan(["嗯"])) + " 就这样", []).messages == ("嗯",)
+
+
+async def test_she_waits_for_someone_who_is_typing(make_group):
+    group = make_group(Provider())
+    clock = [100.0]
+    group.clock = lambda: clock[0]
+    window = group._window(CHANNEL)
+    window.pending = [(100.0, "followup", 1)]
+    assert group._delay(window) == pytest.approx(group_chat.FOLLOWUP_DELAY)
+    window.typing_at = 99.0  # Typing that ended in the message itself does not count.
+    assert group._delay(window) == pytest.approx(group_chat.FOLLOWUP_DELAY)
+    clock[0] = 100.001
+    group.note_typing(CHANNEL)  # Someone is writing more.
+    assert group._delay(window) == pytest.approx(group_chat.TYPING_SECONDS)
+    clock[0] = 100.001 + group_chat.TYPING_SECONDS
+    assert group._delay(window) == 0.0  # They stopped (no new typing event).
+    window.pending = [(100.0, "must", 2)]
+    group.note_typing(CHANNEL)
+    clock[0] += 1
+    must_cap = group_chat.TYPING_MAX_WAIT["must"]
+    assert group._delay(window) == pytest.approx(100.0 + must_cap - clock[0])

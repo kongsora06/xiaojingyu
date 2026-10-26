@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 import uuid
 from datetime import datetime
 
@@ -79,6 +80,11 @@ DURATION = re.compile(r"(\d+)\s*(m|min|分钟?|h|小时)?", re.IGNORECASE)
 STOPPED_RESULT = "[已被老爹中止，未完成]"
 # Tool calls shown in the DM as a "-# 🔧" line: only speaking in the group for him.
 TRAIL_TOOLS = {"group_post"}
+# Discord repeats "started typing" about every 8 s while he types. When he is typing
+# again after a message, she waits for the rest, checking this often, up to a limit.
+TYPING_SECONDS = 10.0
+TYPING_POLL = 0.5
+TYPING_MAX_WAIT = 30.0
 REASONING_PREVIEW_CHARS = 1700
 # Recent messages kept verbatim when compacting automatically; the rest becomes a summary.
 KEEP_RECENT_CHARS = 60000
@@ -263,6 +269,9 @@ class HostAgent:
         # The owner's DM channel, and how far the DM side has caught up with the group.
         self.owner_channel: int | None = None
         self.group_seen = datetime.now().astimezone()
+        # When he last started typing / last sent something here (perf_counter seconds).
+        self.owner_typing_at: dict[int, float] = {}
+        self.owner_said_at: dict[int, float] = {}
         self.closing = False
 
     def sanitize(self, text: str) -> str:
@@ -307,6 +316,7 @@ class HostAgent:
         if not content and not images:
             return True
         self.owner_channel = channel_id
+        self.owner_said_at[channel_id] = time.perf_counter()
         stamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M")
         self.inbox.setdefault(channel_id, []).append(f"[{stamp}] {content or '（发了图片）'}")
         if images:
@@ -467,6 +477,7 @@ class HostAgent:
         )
         steps = 0
         try:
+            await self._let_him_finish(channel_id)
             async with chat.typing():
                 while not self.closing:
                     if pending := self.inbox.pop(channel_id, None):
@@ -550,6 +561,24 @@ class HostAgent:
             )
             + self.memory_snapshot[channel_id],
         }
+
+    def note_typing(self, channel_id) -> None:
+        self.owner_typing_at[channel_id] = time.perf_counter()
+
+    def owner_typing(self, channel_id) -> bool:
+        """He is typing something new (not the message he just sent)."""
+        at = self.owner_typing_at.get(channel_id, float("-inf"))
+        return (
+            at > self.owner_said_at.get(channel_id, float("-inf"))
+            and time.perf_counter() - at < TYPING_SECONDS
+        )
+
+    async def _let_him_finish(self, channel_id) -> None:
+        """While he is still typing, wait for the rest before answering (up to a limit)."""
+        waited = 0.0
+        while self.owner_typing(channel_id) and waited < TYPING_MAX_WAIT:
+            await asyncio.sleep(TYPING_POLL)
+            waited += TYPING_POLL
 
     def tool_specs(self) -> list[dict]:
         """Her tools; the same list on every request (and her quiet-time looks), for the cache."""

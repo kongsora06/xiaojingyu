@@ -160,6 +160,8 @@ class Initiative:
         worker = self.agent.workers.get(channel)
         if worker is not None and not worker.done():
             return False
+        if self.agent.owner_typing(channel):
+            return False  # He is writing to her right now.
         # What she sent him (here or from the group) that he hasn't answered yet.
         pending = self.agent.outgoing.get(channel, [])
         gap = self.gap(len(pending))
@@ -215,7 +217,7 @@ class Initiative:
         try:
             for _ in range(IDLE_STEPS):
                 worker = agent.workers.get(channel)
-                if worker is not None and not worker.done():
+                if (worker is not None and not worker.done()) or agent.owner_typing(channel):
                     return None  # He is back; the chat takes over.
                 message = await self._complete(system, [*history, *turn])
                 if message is None:

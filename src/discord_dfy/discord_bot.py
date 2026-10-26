@@ -228,6 +228,9 @@ class DiscordAgent(discord.Client):
         intents.guilds = True
         intents.guild_messages = True
         intents.dm_messages = settings.personal_mode_enabled
+        # "Someone is typing", so she waits for what they are writing instead of cutting in.
+        intents.guild_typing = True
+        intents.dm_typing = settings.personal_mode_enabled
         # The group brain reads the conversation, not only messages that mention it.
         intents.message_content = True
         super().__init__(
@@ -427,6 +430,16 @@ class DiscordAgent(discord.Client):
         guild = getattr(getattr(source, "guild", None), "name", "") or ""
         channel = getattr(getattr(source, "channel", None), "name", "") or ""
         return guild, f"#{channel}" if channel else ""
+
+    async def on_raw_typing(self, payload: discord.RawTypingEvent) -> None:
+        if self.user is None or payload.user_id == self.user.id:
+            return
+        if payload.guild_id is None:
+            if self.personal is not None and payload.user_id == self.settings.owner_discord_user_id:
+                self.personal.note_typing(payload.channel_id)
+        elif self.group is not None and payload.channel_id in self.settings.allowed_channel_ids:
+            if payload.user is None or not payload.user.bot:
+                self.group.note_typing(payload.channel_id)
 
     async def on_message(self, message: discord.Message) -> None:
         if message.guild is None:

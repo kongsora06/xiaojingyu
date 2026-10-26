@@ -67,6 +67,10 @@ FOLLOWUP_DELAY, FOLLOWUP_MAX_WAIT = 6.0, 20.0
 # Plain messages count as follow-ups only until she has spoken up this many times in a row
 # without being called; then they wait for the normal (level-paced) chance again.
 FOLLOWUP_STREAK = 2
+# Discord says when someone starts typing, again about every 8 s while they keep at it.
+# While someone is typing she waits for their message, but never longer than this.
+TYPING_SECONDS = 10.0
+TYPING_MAX_WAIT = {"must": 12.0, "called": 15.0, "followup": 30.0, "ambient": 60.0}
 # At most one sticker this often.
 STICKER_GAP = 180.0
 AMBIENT_MAX_WAIT = 60.0
@@ -256,6 +260,8 @@ class Window:
     generation: int = 0
     # Times in a row she spoke up without being called (follow-ups and ambient).
     unprompted: int = 0
+    # When someone (not her) last started typing here.
+    typing_at: float = float("-inf")
     last_bot_at: float = float("-inf")
     last_sticker_at: float = float("-inf")
     title: tuple[str, str] = ("", "")
@@ -358,6 +364,15 @@ class GroupChat:
             if window.worker is None or window.worker.done():
                 window.worker = asyncio.create_task(self._work(channel_id, window))
         return trigger
+
+    def note_typing(self, channel_id: int) -> None:
+        """Someone started typing: hold off so their message is read with the rest."""
+        window = self.windows.get(channel_id)
+        if window is None:
+            return
+        window.typing_at = self.clock()
+        if window.pending:
+            window.wake.set()
 
     def trigger_for(self, window: Window, line: ChatLine, addressed: bool) -> Trigger:
         if addressed:
@@ -478,6 +493,12 @@ class GroupChat:
                 return None
             quiet, gap = LEVELS[level]
             due = max(min(last + quiet, first + AMBIENT_MAX_WAIT), window.last_bot_at + gap)
+        # Someone started typing after the last message: wait for what they are writing.
+        if window.typing_at > last and now - window.typing_at < TYPING_SECONDS:
+            due = max(
+                due,
+                min(window.typing_at + TYPING_SECONDS, first + TYPING_MAX_WAIT[strongest]),
+            )
         return max(0.0, due - now)
 
     async def _work(self, channel_id: int, window: Window) -> None:
