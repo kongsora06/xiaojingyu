@@ -36,7 +36,7 @@ WEEKDAYS = "一二三四五六日"
 IDLE_STEPS = 8
 # Her last reply when she does not want to message him.
 SKIP = "（不找他）"
-NUDGE = """[宿主] 这不是老爹发的消息，是宿主在跟你说。现在是 {now}（周{weekday}）。
+NUDGE = """[提示] 这不是老爹发的消息。现在是 {now}（周{weekday}）。
 老爹上次跟你说话是 {ago} 前，这会儿他不在。你过去 24 小时主动找过他 {count} 次。{pending}{group}
 这一会儿是你自己的时间。想做点什么就做：写几句日记、在房间里写点东西或者整理你的清单、
 上网逛逛感兴趣的东西、收张喜欢的图……想做才做，什么都不做、发会儿呆也行。
@@ -49,7 +49,7 @@ NUDGE = """[宿主] 这不是老爹发的消息，是宿主在跟你说。现在
 他说了去睡、在上班、在写作业，就别隔一阵戳他一次，等他差不多回来了再说。
 看看你前几次主动找他说的是什么，这次别又是同一种；没什么想说的就不发。
 他没回你，多半是在忙或者睡了；要不要再找他、说什么，你自己看着办。
-想找他，就把要发给他的话直接写出来作为你最后的回复，用你平时私聊的口吻，别提到宿主；
+想找他，就把要发给他的话直接写出来作为你最后的回复，用你平时私聊的口吻，别提到这条提示；
 不想找他，最后只回 {skip}。"""
 
 
@@ -286,7 +286,7 @@ class Initiative:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": f"[宿主] view_image 打开的图片：{names}"},
+                        {"type": "text", "text": f"[提示] 你打开的图片：{names}"},
                         *(file_block(copy) for _, copy in viewed),
                     ],
                 }
@@ -306,4 +306,4 @@ class AwayChat:
         return nullcontext()
 
 
-SELF_TAG = "[宿主记录] 你主动"
+SELF_TAG = "[附注] 你主动"

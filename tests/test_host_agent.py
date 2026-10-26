@@ -910,7 +910,7 @@ async def test_dm_side_hears_what_happened_in_the_group(make_agent, agent_settin
     chat = Chat()
     await say(agent, chat, "群里在聊啥")
     user = provider.bodies[0]["messages"][-1]["content"]
-    assert user.startswith("[宿主记录] 上次私聊之后群里的动静：\n#闲聊 ")
+    assert user.startswith("[附注] 上次私聊之后群里的动静：\n#闲聊 ")
     assert "阿明：周六爬山去不去" in user and "你：去！" in user and user.endswith("群里在聊啥")
     await say(agent, chat, "好")
     assert "群里的动静" not in provider.bodies[1]["messages"][-1]["content"]  # Caught up.
@@ -987,10 +987,10 @@ async def test_group_side_dm_rides_along_with_the_owners_next_message(
     chat = Chat()
     await say(agent, chat, "你刚才说啥")
     user = provider.bodies[0]["messages"][-1]["content"]
-    assert user.startswith("[宿主记录] ") and "你在群里的时候私信了老爹" in user
+    assert user.startswith("[附注] ") and "你在群里的时候私信了老爹" in user
     assert "\n悄悄话\n\n[" in user and user.endswith("你刚才说啥")
     await say(agent, chat, "好")
-    assert "宿主记录" not in provider.bodies[1]["messages"][-1]["content"]
+    assert "[附注]" not in provider.bodies[1]["messages"][-1]["content"]
     outbox = agent_settings.personal_database_path.parent / "dm_outbox.json"
     assert not agent.outgoing and outbox.read_text(encoding="utf-8") == "{}"
 
@@ -1153,7 +1153,7 @@ async def test_reaches_out_after_a_quiet_spell_and_waits_longer_unanswered(make_
     ask = provider.bodies[1]
     assert ask["tools"] == provider.bodies[0]["tools"]  # Same tools: the prefix is shared.
     nudge = ask["messages"][-1]["content"]
-    assert nudge.startswith("[宿主] 这不是老爹发的消息") and "4 小时" in nudge
+    assert nudge.startswith("[提示] 这不是老爹发的消息") and "4 小时" in nudge
     assert ask["messages"][0] == provider.bodies[0]["messages"][0]  # Same cached prefix.
     # Unanswered: no limit on how many, but the gap doubles (30 min -> 1 h).
     clock.t = first + 45 * 60
@@ -1340,6 +1340,8 @@ def test_looking_back_keeps_his_words_apart_from_host_notes():
     owner, mine = host_agent.split_host_notes(turn)
     assert owner == "[2026-10-23 22:50] 我去骂他\n\n[2026-10-23 22:51] 算了"
     assert mine == ["小红 一进来就叫我大肥鱼"]
+    # Conversations stored before the rename ("[宿主记录]") and after ("[附注]") read the same.
+    assert host_agent.split_host_notes(turn.replace("[宿主记录]", "[附注]")) == (owner, mine)
     assert host_agent.split_host_notes("[2026-10-23 22:50] 嗨") == ("[2026-10-23 22:50] 嗨", [])
 
 
@@ -1407,7 +1409,7 @@ async def test_in_a_quiet_spell_she_does_her_own_things(make_agent, agent_settin
     # The DM side learns what she did, with his next message.
     await say(agent, chat, "我回来了")
     user = provider.bodies[3]["messages"][-1]["content"]
-    assert user.startswith("[宿主记录] 你自己待着的时候")
+    assert user.startswith("[附注] 你自己待着的时候")
     assert "- 写了日记\n- 在房间里写了 诗/等.md" in user and user.endswith("] 我回来了")
     assert not agent.activity
 
