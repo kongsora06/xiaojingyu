@@ -31,6 +31,7 @@ from .host_tools import (
     clip,
     describe_call,
     download_image,
+    monitor_text,
 )
 from .images import MAX_IMAGE_BYTES, file_block, image_type, load_block, text_of
 from .memory import (
@@ -789,7 +790,7 @@ class HostAgent:
                     )
                 output = await self._run_tool(name, arguments, chat, channel_id)
                 if publisher:
-                    publisher.event("tool-result", name=name, text=output)
+                    publisher.event("tool-result", name=name, text=monitor_text(name, output))
                 results.append({"role": "tool", "tool_call_id": call["id"], "content": output})
         finally:
             # Every tool_call needs a result, or the next request is rejected.
