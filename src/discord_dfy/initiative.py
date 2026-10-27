@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import random
+import re
 import time
 from contextlib import nullcontext
 from datetime import datetime
@@ -36,6 +37,7 @@ WEEKDAYS = "一二三四五六日"
 IDLE_STEPS = 8
 # Her last reply when she does not want to message him.
 SKIP = "（不找他）"
+SKIP_MARK = re.compile(r"[（(]\s*不找他\s*[)）]")
 NUDGE = """[提示] 这不是老爹发的消息。现在是 {now}（周{weekday}）。
 老爹上次跟你说话是 {ago} 前，这会儿他不在。你过去 24 小时主动找过他 {count} 次。{pending}{group}
 这一会儿是你自己的时间。想做点什么就做：写几句日记、在房间里写点东西或者整理你的清单、
@@ -230,7 +232,8 @@ class Initiative:
         finally:
             if done:
                 await agent.note_activity(channel, done)
-        if not text or not text.replace(SKIP, "").strip(" 。.\n"):
+        # The skip mark anywhere means no: what follows it is her talking to herself.
+        if not text or SKIP_MARK.search(text):
             return None
         return agent.sanitize(text)[:1800]
 
