@@ -18,6 +18,7 @@ import logging
 import random
 import re
 import time
+import uuid
 from contextlib import nullcontext
 from datetime import datetime
 
@@ -25,8 +26,9 @@ from openai import APIError
 
 from .config import parse_quiet_hours
 from .host_agent import fit, loads, request_messages, save_json
-from .host_tools import ToolError, what_she_did
+from .host_tools import ToolError, describe_call, monitor_text, what_she_did
 from .images import file_block
+from .streaming import collect_stream
 
 log = logging.getLogger(__name__)
 CHECK_SECONDS = 600
@@ -217,54 +219,83 @@ class Initiative:
         turn = [{"role": "user", "content": nudge}]
         done: list[str] = []
         text = None
+        # The Live Monitor shows her thinking, what she did and her answer; never what is
+        # written in her room or diary.
+        publisher = (
+            agent.observer.publisher("personal", session_id="自己待着", task_id=uuid.uuid4().hex)
+            if agent.observer is not None
+            else None
+        )
         try:
             for _ in range(IDLE_STEPS):
                 worker = agent.workers.get(channel)
                 if (worker is not None and not worker.done()) or agent.owner_typing(channel):
                     return None  # He is back; the chat takes over.
-                message = await self._complete(system, [*history, *turn])
+                message = await self._complete(system, [*history, *turn], publisher)
                 if message is None:
                     return None
                 if not message.tool_calls:
                     text = (message.content or "").strip()
                     break
-                await self._use_tools(channel, message, turn, done)
+                await self._use_tools(channel, message, turn, done, publisher)
         finally:
             if done:
                 await agent.note_activity(channel, done)
         # The skip mark anywhere means no: what follows it is her talking to herself.
-        if not text or SKIP_MARK.search(text):
+        skipped = not text or bool(SKIP_MARK.search(text))
+        if publisher:
+            publisher.event(
+                "task-status",
+                status="completed",
+                text="这次不找老爹" if skipped else "发给老爹了",
+            )
+        if skipped:
             return None
         return agent.sanitize(text)[:1800]
 
-    async def _complete(self, system, conversation):
+    async def _complete(self, system, conversation, publisher=None):
         agent = self.agent
+        settings = self.settings
         messages = [
             system,
-            *request_messages(fit(conversation, self.settings.agent_context_chars)),
+            *request_messages(fit(conversation, settings.agent_context_chars)),
         ]
+        # She thinks here the way she does in the chat.
+        thinking = settings.agent_thinking
+        request_id = uuid.uuid4().hex
+        stream = publisher is not None
         try:
-            async with asyncio.timeout(180):
+            async with asyncio.timeout(600):
                 response = await agent.client.chat.completions.create(
-                    model=self.settings.agent_model,
+                    model=settings.agent_model,
                     messages=messages,
                     # The same tools as in the chat, so the cached prefix is shared.
                     tools=agent.tool_specs(),
-                    max_tokens=2048,
-                    extra_body={"thinking": {"type": "disabled"}},
+                    max_tokens=8192,
+                    extra_body={"thinking": {"type": "enabled" if thinking else "disabled"}},
+                    stream=stream,
+                    **({"reasoning_effort": settings.agent_reasoning_effort} if thinking else {}),
+                    **({"stream_options": {"include_usage": True}} if stream else {}),
                 )
+                if stream:
+                    response = await collect_stream(response, publisher, request_id)
         except (TimeoutError, APIError) as error:
             log.warning("Initiative request failed; error_type=%s", type(error).__name__)
+            if publisher:
+                publisher.event("model-status", status="failed", request_id=request_id)
             return None
         return response.choices[0].message if response.choices else None
 
-    async def _use_tools(self, channel, message, turn, done) -> None:
+    async def _use_tools(self, channel, message, turn, done, publisher=None) -> None:
         agent = self.agent
         calls = message.tool_calls
+        # With thinking on, DeepSeek wants the reasoning back for the rest of this turn.
+        reasoning = getattr(message, "reasoning_content", None)
         turn.append(
             {
                 "role": "assistant",
                 "content": message.content or "",
+                **({"reasoning_content": reasoning} if reasoning else {}),
                 "tool_calls": [
                     {
                         "id": call.id,
@@ -280,7 +311,11 @@ class Initiative:
         )
         for call in calls:
             name, raw = call.function.name, call.function.arguments
+            if publisher:
+                publisher.event("tool-call", name=name, text=describe_call(name, loads(raw) or {}))
             output = await agent._run_tool(name, raw, AwayChat(), channel)
+            if publisher:
+                publisher.event("tool-result", name=name, text=monitor_text(name, output))
             turn.append({"role": "tool", "tool_call_id": call.id, "content": output})
             if not output.startswith("错误") and (line := what_she_did(name, loads(raw) or {})):
                 done.append(line)

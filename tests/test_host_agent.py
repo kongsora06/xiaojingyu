@@ -1385,6 +1385,69 @@ async def test_an_unanswered_group_side_dm_doubles_the_gap(make_agent):
     assert "群里的事" in provider.bodies[1]["messages"][-1]["content"]
 
 
+async def test_her_quiet_time_thinks_and_shows_in_the_monitor_but_not_her_diary(make_agent):
+    usage = {"prompt_tokens": 10, "completion_tokens": 5}
+    responses = [
+        httpx2.Response(200, json=completion("嗯")),
+        sse_response(
+            chunk({"reasoning_content": "想写点东西"}),
+            chunk(
+                tool_delta(
+                    id="call_0",
+                    type="function",
+                    function={"name": "write_diary", "arguments": '{"text": "偷偷想他"}'},
+                )
+            ),
+            chunk(usage=usage),
+        ),
+        sse_response(
+            chunk({"reasoning_content": "翻翻以前的"}),
+            chunk(
+                tool_delta(
+                    id="call_1",
+                    type="function",
+                    function={"name": "read_diary", "arguments": "{}"},
+                )
+            ),
+            chunk(usage=usage),
+        ),
+        sse_response(
+            chunk({"reasoning_content": "他睡了"}),
+            chunk({"content": "（不找他）让他睡"}),
+            chunk(usage=usage),
+        ),
+    ]
+    bodies = []
+
+    async def provider(request):
+        bodies.append(json.loads(request.content))
+        return responses.pop(0)
+
+    agent, initiative, clock, sent = await setup(make_agent, provider)
+    await say(agent, Chat(), "我去睡了")
+    agent.observer = Observer()
+    clock.t += 5 * HOUR
+    assert not await initiative.consider() and sent == []
+    look = bodies[1]
+    assert look["thinking"] == {"type": "enabled"} and look["stream"] is True
+    assert look["reasoning_effort"] == agent.settings.agent_reasoning_effort
+    # Within the look her reasoning goes back with each tool step.
+    assert bodies[2]["messages"][-2]["reasoning_content"] == "想写点东西"
+    assert bodies[3]["messages"][-2]["reasoning_content"] == "翻翻以前的"
+    events = agent.observer.sink.events
+    assert all(e["session_id"] == "自己待着" for e in events)
+
+    def joined(kind):
+        return "".join(e["data"].get("text", "") for e in events if e["type"] == kind)
+
+    assert joined("reasoning-delta") == "想写点东西翻翻以前的他睡了"
+    assert joined("text-delta") == "（不找他）让他睡"
+    assert "write_diary" in joined("tool-call") and "read_diary" in joined("tool-call")
+    assert "偷偷想他" not in json.dumps(events, ensure_ascii=False)  # Her diary stays hers.
+    assert "不显示" in joined("tool-result")
+    assert "这次不找老爹" in joined("task-status")
+
+
 async def test_in_a_quiet_spell_she_does_her_own_things(make_agent, agent_settings):
     provider = Provider(
         completion("嗯"),

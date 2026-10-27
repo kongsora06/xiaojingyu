@@ -536,6 +536,18 @@ def what_she_did(name: str, arguments: dict) -> str | None:
     return None  # Just looking around (reading, listing, viewing) is not worth a line.
 
 
+# What she writes or reads in her room and diary stays out of the monitor; he won't look.
+PRIVATE_WRITES = {"write_diary", "rewrite_self"}
+PRIVATE_READS = {"room_read", "read_diary"}
+
+
+def monitor_text(name: str, output: str) -> str:
+    """A tool result as the Live Monitor shows it."""
+    if name in PRIVATE_READS and not output.startswith("错误"):
+        return f"（她房间里的东西，不显示，{len(output)} 字）"
+    return output
+
+
 def describe_call(name: str, arguments: dict) -> str:
     """One-line human summary of a tool call for the monitor and the DM trail."""
     if name == "group_post":
@@ -550,6 +562,8 @@ def describe_call(name: str, arguments: dict) -> str:
         detail = arguments.get("path", "")
     elif name == "remember":
         detail = f"{arguments.get('section', '')} {arguments.get('text', '')}"
+    elif name in PRIVATE_WRITES:
+        detail = ""  # Her diary is hers; her self-portrait is shown by !self.
     else:
         detail = json.dumps(arguments, ensure_ascii=False)
     detail = " ".join(str(detail).split()).replace("`", "'")
