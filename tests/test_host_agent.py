@@ -1363,6 +1363,15 @@ async def test_group_events_are_not_remembered_as_his_words(make_agent):
     await agent.group.close()
 
 
+async def test_a_skip_with_her_reasons_still_sends_nothing(make_agent):
+    reasons = "（不找他）\n\n他都说了要睡了，这会儿去戳他，明天又该顶着黑眼圈了。"
+    provider = Provider(completion("嗯"), completion(reasons))
+    agent, initiative, clock, sent = await setup(make_agent, provider)
+    await say(agent, Chat(), "我去睡了")
+    clock.t += 5 * HOUR
+    assert not await initiative.consider() and sent == [] and len(provider.bodies) == 2
+
+
 async def test_an_unanswered_group_side_dm_doubles_the_gap(make_agent):
     provider = Provider(completion("嗯"), completion("（不找他）"))
     agent, initiative, clock, sent = await setup(make_agent, provider)
