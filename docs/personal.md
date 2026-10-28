@@ -151,6 +151,7 @@ uv run dfy-monitor            # --verbose 另显示任务/模型状态
 - 你们上次说话至少 `AGENT_INITIATIVE_IDLE_MINUTES`（默认 30）分钟之前；
 - 她发给你的私信你还没回的，每有一条间隔就翻一倍（30 分钟 → 1 小时 → 2 小时 …，最长 8 小时）；
 - 不在免打扰时间 `AGENT_QUIET_HOURS`（默认 `03:00-11:00`，可以跨午夜，留空表示没有）；
+- 不在高峰时段：北京时间周一至周五 9:00-12:00、14:00-18:00（按你这边的时间自动换算；周末全天不算；`AGENT_SKIP_PEAK=false` 关掉）。高峰时段她不会有这段时间，想说的等高峰过了再说；
 - 次数默认不限；想限制就设 `AGENT_INITIATIVE_PER_DAY`（0 = 不限）；
 - 发出去的话会附在你下一条消息前面交给私聊那边，她知道是自己说的。
 - `!proactive` 看状态，`!proactive on/off` 开关，`AGENT_INITIATIVE=false` 彻底关掉。

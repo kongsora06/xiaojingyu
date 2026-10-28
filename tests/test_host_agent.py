@@ -3,7 +3,7 @@ import json
 import time
 from contextlib import nullcontext
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -30,7 +30,7 @@ from discord_dfy.host_agent import (
     transcript,
 )
 from discord_dfy.host_tools import Room, ToolError, describe_call, download_image
-from discord_dfy.initiative import SELF_TAG, Initiative, ago, in_quiet_hours
+from discord_dfy.initiative import SELF_TAG, Initiative, ago, in_peak, in_quiet_hours
 from discord_dfy.monitor_protocol import Publisher
 from discord_dfy.service import AgentService
 
@@ -1130,7 +1130,9 @@ async def setup(make_agent, provider, **overrides):
         sent.append(text)
         await agent.note_outgoing(CHANNEL, text, "self")
 
-    initiative = Initiative(agent, reach, clock=clock, now=lambda: datetime(2026, 10, 22, 20))
+    # Thursday 20:00 UTC is Friday 04:00 in Beijing: off-peak.
+    now = lambda: datetime(2026, 10, 22, 20, tzinfo=UTC)  # noqa: E731
+    initiative = Initiative(agent, reach, clock=clock, now=now)
     agent.initiative = initiative
     return agent, initiative, clock, sent
 
@@ -1189,6 +1191,29 @@ async def test_declines_quietly_and_respects_limits(make_agent):
     # Persisted across restarts.
     again = Initiative(agent, None, clock=clock)
     assert not again.enabled and again.last_look == initiative.last_look
+
+
+def test_peak_hours_are_beijing_weekday_working_hours():
+    beijing = timezone(timedelta(hours=8))
+    at = lambda d, h, m=0: datetime(2026, 10, d, h, m, tzinfo=beijing)  # noqa: E731
+    assert in_peak(at(26, 9)) and in_peak(at(30, 11, 59)) and in_peak(at(27, 14))
+    assert not in_peak(at(26, 8, 59)) and not in_peak(at(26, 12)) and not in_peak(at(26, 13, 30))
+    assert not in_peak(at(26, 18)) and not in_peak(at(24, 10)) and not in_peak(at(25, 15))
+    # His Monday 20:00 CDT is Tuesday 09:00 in Beijing.
+    cdt = timezone(timedelta(hours=-5))
+    assert in_peak(datetime(2026, 10, 26, 20, tzinfo=cdt))
+    assert not in_peak(datetime(2026, 10, 26, 19, 59, tzinfo=cdt))
+
+
+async def test_peak_hours_hold_her_back_until_they_end(make_agent):
+    provider = Provider(completion("嗯"), completion("忙完没"))
+    agent, initiative, clock, sent = await setup(make_agent, provider)
+    await say(agent, Chat(), "hi")
+    clock.t += 5 * HOUR
+    initiative.now = lambda: datetime(2026, 10, 27, 7, tzinfo=UTC)  # 15:00 Tuesday, Beijing.
+    assert not await initiative.consider() and len(provider.bodies) == 1
+    initiative.now = lambda: datetime(2026, 10, 27, 10, tzinfo=UTC)  # 18:00: peak is over.
+    assert await initiative.consider() and sent == ["忙完没"]
 
 
 async def test_quiet_hours_and_running_turns_block_reaching_out(make_agent):
