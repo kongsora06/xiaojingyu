@@ -16,7 +16,9 @@ places:
   and no access to other files. She can also message the owner first after a quiet spell.
   See the [Personal Mode guide](docs/personal.md).
 
-Both sides share the short starting persona in [`persona.md`](src/discord_dfy/persona.md) and one
+Both sides share the fixed part of her persona in [`persona.md`](src/discord_dfy/persona.md) (name,
+relationship, how she talks), her self-portrait `data/self.md` (who she is, which she rewrites
+herself; [`self_start.md`](src/discord_dfy/self_start.md) until she does) and one
 long-term memory file (`data/memory.md`) that she keeps growing herself. Private DM talk is not
 handed to the group side. The optional [Live Monitor](docs/monitor.md) shows her thinking,
 decisions and tool calls as they stream.
@@ -105,7 +107,8 @@ src/discord_dfy/
   host_tools.py          Her things: notebook, diary, room, saving pictures
   initiative.py          Reaching out to the owner first
   memory.py              The shared memory file: notes, sections, tidying
-  persona.md, persona.py Starting persona and host identity rules
+  persona.md, persona.py Fixed persona and host identity rules
+  portrait.py, self_start.md  Her self-portrait and its starting version
   profile.py             Discord status and profile changes
   stickers.py            Sticker library (data/stickers/stickers.json)
   images.py, web.py      Image input and DeepSeek Search / Fetch

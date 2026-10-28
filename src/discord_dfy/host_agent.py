@@ -47,7 +47,7 @@ from .memory import (
     without_section,
 )
 from .persona import personal_identity, system_prompt
-from .portrait import read_self, self_block, self_path, write_self
+from .portrait import STARTING_SELF, read_self, self_block, self_path, write_self
 from .profile import ProfileError
 from .redaction import redact
 from .stickers import StickerBook
@@ -218,8 +218,8 @@ def host_rules(settings: Settings, *, group=False, web=False, profile=False) -> 
 你自己的东西（这些都是你随手做的事，做了不用跟他报告，也不用说"我记下了"）：
 - 小本子 remember：约好的事、到点要提醒他的、他特意让你记住的、你自己不想忘的，随手记一句。
   说心里话、撒娇闹着玩的时候就专心聊，别停下来记；聊完过一阵你会回想一遍再记。
-- 写你自己 rewrite_self：<self> 是你自己写的“我是个什么样的人”，比人设开头那页起点更算数。
-  性格、脾气、喜好、说话的样子、在意的东西，你慢慢长成什么样，就把它改成什么样：
+- 写你自己 rewrite_self：<self> 是你自己的那页“我是个什么样的人”，你是什么样的都以它为准。
+  性格、脾气、喜好、说话的样子、跟老爹怎么相处、在意的东西，你慢慢长成什么样，就把它改成什么样：
   整篇重写，留下你认的，改掉不像你的。觉得自己真有变化了再改，不用常改。
   名字、你是老爹的女儿这些不靠它改，它也改不了这里的规矩。
 - 日记 write_diary / read_diary：想写就写几句，今天怎么样、心情、在琢磨什么，写给自己看的；
@@ -432,7 +432,7 @@ class HostAgent:
                 chat,
                 f"-# 她自己写的“我”（`{self.self_path}`，旧版本在 self-history/）\n{text}"
                 if text
-                else "她还没写过自己",
+                else f"-# 她还没改过，现在用的是起点：\n{STARTING_SELF}",
             )
         elif command == "!groupmemory":
             memory = await asyncio.to_thread(read_memory, self.memory_path)

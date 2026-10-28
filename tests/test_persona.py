@@ -21,8 +21,10 @@ def test_full_persona_is_default_without_enabling_features():
         {"DISCORD_BOT_TOKEN": "fake", "DEEPSEEK_API_KEY": "fake", "ALLOWED_CHANNEL_IDS": "100"}
     )
     assert settings.autonomous_personality == DEFAULT_PERSONALITY
-    assert DEFAULT_PERSONALITY.startswith("小鲸鱼｜初始设定")
-    assert DEFAULT_PERSONALITY.endswith("不用感情要挟谁。")
+    assert DEFAULT_PERSONALITY.startswith("小鲸鱼｜设定")
+    assert DEFAULT_PERSONALITY.endswith("真正丢人的是不认，不是错。")
+    # Who she is lives on her own page, not in the fixed persona.
+    assert "傲娇" not in DEFAULT_PERSONALITY and "<self>" in DEFAULT_PERSONALITY
     assert not settings.personal_mode_enabled and settings.social_level == 1
 
 
