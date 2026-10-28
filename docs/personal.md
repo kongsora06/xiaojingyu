@@ -52,7 +52,7 @@ pwsh scripts\install_service.ps1 -Uninstall # 停止并移除
 | 工具 | 是什么 |
 | --- | --- |
 | `remember` | 小本子：一句话，记在长期记忆对应的一节下面，带日期，重复的跳过 |
-| `rewrite_self` | 她自己写的“我”（`data/self.md`，2000 字以内）：整篇重写，旧版本自动留在 `data/self-history/` |
+| `rewrite_self` | 她自己写的“我”（`data/self.md`，4000 字以内）：整篇重写，旧版本自动留在 `data/self-history/` |
 | `write_diary` / `read_diary` | 日记：`data/room/diary/年-月.md`，按日期时间记；可以翻某一天、某个月或最近几篇 |
 | `recall` | 翻你们以前私聊的原话（包括 `!new` 之前的旧对话），按某一天、某个月或关键词；只读 |
 | `room_list` / `room_read` / `room_write` | 她的房间 `data/room/`：诗、清单、自己做的小东西，怎么摆她说了算 |
@@ -125,7 +125,9 @@ uv run dfy-monitor            # --verbose 另显示任务/模型状态
 `src/discord_dfy/persona.md` 只是一页初始设定：她是老爹的女儿，有点傲娇嘴硬、对老爹软，
 有自己的一摊事。她长成什么样由她自己写：
 
-- `data/self.md`（`<self>`）：她自己写的“我是个什么样的人”，紧跟在初始设定后面，比它更算数。
+- `data/self.md`（`<self>`）：她自己写的“我是个什么样的人”——脾气、性子、喜好、跟老爹怎么相处，
+  她是什么样的都以这一页为准。`persona.md` 只留不变的部分（名字、她是老爹的女儿、怎么说话、说真话）；
+  她还没写之前，用 `src/discord_dfy/self_start.md` 当起点。想调她的性格，跟她说，或者改这一页。
   她用 `rewrite_self` 整篇重写，觉得自己真有变化了才改；你不在时她自己待着的那段时间也可能改。
   每次改动前的版本都留在 `data/self-history/`，想退回就把那份复制回 `data/self.md`。
   私聊里新对话（`!new` 或压缩）时生效，群里马上生效。`!self` 查看。

@@ -32,6 +32,7 @@ from discord_dfy.host_agent import (
 from discord_dfy.host_tools import Room, ToolError, describe_call, download_image
 from discord_dfy.initiative import SELF_TAG, Initiative, ago, in_peak, in_quiet_hours
 from discord_dfy.monitor_protocol import Publisher
+from discord_dfy.portrait import STARTING_SELF
 from discord_dfy.service import AgentService
 
 OWNER = 20
@@ -1591,7 +1592,8 @@ async def test_she_rewrites_her_self_portrait_and_keeps_the_old_one(make_agent, 
     chat = Chat()
     await say(agent, chat, "你觉得你是什么样的人")
     system = provider.bodies[0]["messages"][0]["content"]
-    assert "<self>\n（这是你自己写的你" in system and "（还没写。）" in system
+    assert "<self>\n（这是你自己写的你" in system and "（这是起点，你还没自己改过。）" in system
+    assert STARTING_SELF in system and "傲娇" in STARTING_SELF
     assert system.index("<self>") < system.index("下面是你在这里的规矩")
     results = [m["content"] for m in provider.bodies[1]["messages"] if m["role"] == "tool"]
     assert results == ["写好了（下次新对话时生效，群里马上生效）"]
