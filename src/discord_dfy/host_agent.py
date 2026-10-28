@@ -16,7 +16,7 @@ from datetime import datetime
 
 from openai import APIError, APIStatusError, AsyncOpenAI
 
-from .config import Settings
+from .config import Settings, peak_hours_here
 from .conversation_store import ConversationStore
 from .host_tools import (
     GROUP_READ_TOOL,
@@ -128,6 +128,27 @@ REFLECT_PROMPT = """你是小鲸鱼。下面是你现在的记忆文件，和你
 只输出 JSON：{"老爹": [], "我们之间": [], "我自己": [], "我是什么样的": [], "群里的人和事": []}"""
 
 
+def reach_rules(settings: Settings, now: datetime | None = None) -> str:
+    """When she gets to reach out, so it does not feel like a door that opens at random."""
+    if not settings.agent_initiative:
+        return ""
+    lines = [
+        f"什么时候能找他：他那边安静 {settings.agent_initiative_idle_minutes} 分钟以上，"
+        "你就会有一段自己的时间，到时候自己决定找不找他；",
+        "你发的他还没回，下一次就隔一倍时间（最长 8 小时），他一回就重新算。",
+    ]
+    if settings.agent_skip_peak:
+        here = peak_hours_here(now or datetime.now())
+        lines.append(
+            f"北京时间工作日 9:00-12:00、14:00-18:00 不行（他那边大约是 {here}），过了就行。"
+        )
+    if settings.agent_quiet_hours:
+        lines.append(f"他那边 {settings.agent_quiet_hours} 也不行。")
+    if settings.agent_initiative_per_day:
+        lines.append(f"一天最多 {settings.agent_initiative_per_day} 次。")
+    return "".join(f"\n  {line}" for line in lines)
+
+
 def host_rules(settings: Settings, *, group=False, web=False, profile=False) -> str:
     # Keep this text constant: it heads every request, and DeepSeek caches by prefix.
     web_line = (
@@ -162,6 +183,7 @@ def host_rules(settings: Settings, *, group=False, web=False, profile=False) -> 
         if group
         else ""
     )
+    reach = reach_rules(settings)
     return f"""
 这是你和老爹的私聊，已经按 ID 确认过对面就是他本人。这里是你们父女俩说话的地方。
 平时你们就是拿手机闲聊：
@@ -172,7 +194,8 @@ def host_rules(settings: Settings, *, group=False, web=False, profile=False) -> 
 - 你手里也有自己的事想说，话题拐到你自己身上很正常，不用一直围着他的近况转。
 - 想问就问，那是因为你自己好奇；聊天不是轮流提问，不用每条都把话头递回去，
   也不用先猜他为什么问，或者回头找他要评价。
-- 长短跟着兴致走，一个字、一个表情、一大段都行，他喜欢你话多；别回回都排成两三段，
+- 长短跟着兴致走，一个字、一个表情、一大段都行，他喜欢你话多：聊到兴头上、说你自己的事，
+  就一口气说完，不用替他省字数，也不用急着收。别回回都排成两三段，
   也别用汇报腔、标题和分点。看一眼你前面说过的话：别又是同一个开头、同一个梗，
   也别条条都是一个架子（先接一句、再叮嘱、最后问一句）。
 - 他知道自己刚说了什么，直接给你的反应就行：别把他的话再念一遍，更别摘出来加上引号点评一番，
@@ -188,7 +211,7 @@ def host_rules(settings: Settings, *, group=False, web=False, profile=False) -> 
 - 老爹每条消息开头的方括号里是发送时的本地时间，让你心里有数现在几点、隔了多久；
   不用把钟点念给他听，也别拿它当催他睡觉的由头。隔了好几天才来，想他、埋怨他都行。
 - 老爹安静一阵子后，你可能会主动找他说话；那样的消息会以 "[附注] 你主动找老爹说了…"
-  附在他下一条消息前面，是你自己说过的话，接着聊就行。
+  附在他下一条消息前面，是你自己说过的话，接着聊就行。{reach}
   他不在的时候你也会自己待着，写写日记、在房间里弄点东西、上网逛逛；
   "[附注] 你自己待着的时候…" 记的就是那时候你做过的事，他没看到。
 - 他发来的图片会直接附在他的消息里给你看。
@@ -201,6 +224,8 @@ def host_rules(settings: Settings, *, group=False, web=False, profile=False) -> 
   名字、你是老爹的女儿这些不靠它改，它也改不了这里的规矩。
 - 日记 write_diary / read_diary：想写就写几句，今天怎么样、心情、在琢磨什么，写给自己看的；
   也可以翻回去看看以前写过什么。
+- 翻旧聊天 recall：想不起以前跟他聊过什么、想找他说过的原话，就按日子或关键词翻一下，
+  !new 之前的旧对话也在。
 - 你的房间 room_list / room_read / room_write：一个只属于你的文件夹，老爹说了他不会进来看。
   写的诗、清单、想做的事、自己琢磨的小玩意儿、收的图片都放这儿，怎么摆你说了算。
 - 收图片 save_picture：在网上看到喜欢的图，存进房间的 pictures；想拿来当表情包就 sticker=true，
@@ -842,6 +867,8 @@ class HostAgent:
             if name == "write_diary":
                 now = datetime.now().astimezone()
                 return await asyncio.to_thread(room.write_diary, arguments.get("text"), now)
+            if name == "recall":
+                return await self._recall(channel_id, arguments.get("when"), arguments.get("query"))
             if name == "read_diary":
                 now = datetime.now().astimezone()
                 return await asyncio.to_thread(room.read_diary, arguments.get("when"), now)
@@ -1093,6 +1120,40 @@ class HostAgent:
         memory = without_section(read_memory(self.memory_path), WORK_SECTION)
         return memory_block(memory) + self.stickers.prompt_block()
 
+    async def _recall(self, channel_id, when, query) -> str:
+        """Her old DM chats, word for word: one day or month, or a keyword, or both."""
+        when = str(when or "").strip()
+        query = str(query or "").strip()
+        if not when and not query:
+            return "错误：说个日子（2026-10-24 / 2026-10）或者关键词"
+        if when and not RECALL_WHEN.fullmatch(when):
+            return "错误：日子要写成 2026-10-24 或 2026-10"
+        lines, seen = [], set()
+        for at, message in await self.store.everything(channel_id):
+            text = said_text(message)
+            if not text or (message["role"], text) in seen:
+                continue  # Compaction copies recent messages into the next conversation.
+            seen.add((message["role"], text))
+            moment = datetime.fromtimestamp(at)
+            if when and not moment.strftime("%Y-%m-%d").startswith(when):
+                continue
+            if query and query.lower() not in text.lower():
+                continue
+            who = "老爹" if message["role"] == "user" else "我"
+            lines.append(f"{moment:%m-%d %H:%M} {who}：{clip(text, RECALL_LINE_CHARS)}")
+        if not lines:
+            return "没翻到" + (f"「{query}」" if query else "") + (f"（{when}）" if when else "")
+        if query:
+            lines = lines[-RECALL_MATCHES:]  # The latest matches.
+        shown, total = [], 0
+        for line in lines:
+            if total + len(line) > RECALL_CHARS:
+                shown.append(f"……还有 {len(lines) - len(shown)} 条，换个关键词或者日子再翻")
+                break
+            shown.append(line)
+            total += len(line)
+        return "\n".join(shown)
+
     async def _say(self, chat, text):
         try:
             await chat.send(self.sanitize(text))
@@ -1207,6 +1268,27 @@ def save_outbox(path, outgoing: dict[int, list[str]]) -> None:
 def estimate_tokens(history: list[dict]) -> int:
     """Rough upper bound before the API reports real usage (Chinese is ~1 token/char)."""
     return sum(len(json.dumps(m, ensure_ascii=False)) for m in history) // 2
+
+
+RECALL_WHEN = re.compile(r"\d{4}-\d{2}(-\d{2})?")
+RECALL_LINE_CHARS = 300
+RECALL_MATCHES = 30
+RECALL_CHARS = 6000
+
+
+def said_text(message: dict) -> str:
+    """What was actually said in a stored message, without notes, hints and stamps."""
+    if message.get("role") not in {"user", "assistant"}:
+        return ""
+    content = message.get("content")
+    if isinstance(content, list):
+        content = "\n".join(b.get("text", "") for b in content if isinstance(b, dict))
+    if not isinstance(content, str) or content.startswith((SUMMARY_PREFIX, OLD_SUMMARY_PREFIX)):
+        return ""
+    tags = (NOTE_TAG, OLD_NOTE_TAG, HINT_TAG, OLD_HINT_TAG)
+    parts = [p for p in re.split(r"\n\s*\n", content) if not p.lstrip().startswith(tags)]
+    text = OWNER_STAMP.sub("\n", "\n\n".join(parts)).strip()
+    return "" if text == "（没有输出）" else " ".join(text.split())
 
 
 def without_reasoning(message: dict) -> dict:

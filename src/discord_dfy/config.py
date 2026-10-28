@@ -6,6 +6,7 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -191,6 +192,27 @@ class Settings:
             monitor_enabled=boolean("MONITOR_ENABLED", "false"),
             monitor_directory=Path(monitor_directory),
         )
+
+
+# Peak hours, Beijing time (UTC+8, no daylight saving): weekdays 09-12 and 14-18.
+BEIJING = timezone(timedelta(hours=8))
+PEAK_HOURS = ((9, 12), (14, 18))
+
+
+def in_peak(moment: datetime) -> bool:
+    here = moment.astimezone(BEIJING)
+    return here.weekday() < 5 and any(start <= here.hour < end for start, end in PEAK_HOURS)
+
+
+def peak_hours_here(now: datetime) -> str:
+    """The peak windows on the local clock, e.g. "20:00-23:00、01:00-05:00"."""
+    now = now.astimezone()
+    day = now.astimezone(BEIJING).replace(hour=0, minute=0, second=0, microsecond=0)
+    spans = []
+    for start, end in PEAK_HOURS:
+        a, b = (day.replace(hour=h).astimezone(now.tzinfo) for h in (start, end))
+        spans.append(f"{a:%H:%M}-{b:%H:%M}")
+    return "、".join(spans)
 
 
 def parse_quiet_hours(text: str):

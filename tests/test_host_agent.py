@@ -183,6 +183,7 @@ async def test_she_keeps_notes_quietly_with_a_persons_tools(make_agent, store, a
         "rewrite_self",
         "write_diary",
         "read_diary",
+        "recall",
         "room_list",
         "room_read",
         "room_write",
@@ -1534,6 +1535,44 @@ async def test_no_reaching_out_while_he_is_typing(make_agent):
     clock.t += 5 * HOUR
     agent.note_typing(CHANNEL)
     assert not await initiative.consider() and len(provider.bodies) == 1
+
+
+async def test_recall_finds_old_chats_word_for_word(make_agent):
+    provider = Provider(completion("那你多睡会儿"), completion("记得，爬山"))
+    agent = await make_agent(provider)
+    chat = Chat()
+    await say(agent, chat, "我周六要去爬山")
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!new", chat=chat)
+    await agent.note_activity(CHANNEL, ["写了日记"])
+    await say(agent, chat, "还记得我说过什么吗")
+
+    async def recall(**arguments):
+        return await agent._run_tool("recall", json.dumps(arguments), chat, CHANNEL)
+
+    found = await recall(query="爬山")  # Across !new.
+    assert found.count("\n") == 1 and "老爹：我周六要去爬山" in found and "我：记得，爬山" in found
+    day = await recall(when=datetime.now().strftime("%Y-%m-%d"))
+    assert "我：那你多睡会儿" in day and "老爹：还记得我说过什么吗" in day
+    assert "附注" not in day and "[20" not in day  # Only what was said.
+    assert await recall(when=datetime.now().strftime("%Y-%m")) == day
+    assert (await recall()).startswith("错误") and (await recall(when="昨天")).startswith("错误")
+    assert await recall(query="潜水") == "没翻到「潜水」"
+
+
+def test_her_rules_say_when_she_can_reach_out(agent_settings):
+    rules = replace(agent_settings, agent_initiative=True, agent_quiet_hours="")
+    cdt = timezone(timedelta(hours=-5))
+    text = host_agent.reach_rules(rules, datetime(2026, 10, 28, 12, tzinfo=cdt))
+    assert f"安静 {rules.agent_initiative_idle_minutes} 分钟以上" in text
+    assert "他那边大约是 20:00-23:00、01:00-05:00" in text and "也不行" not in text
+    assert "也不行" in host_agent.reach_rules(replace(rules, agent_quiet_hours="03:00-11:00"))
+    assert host_agent.reach_rules(replace(rules, agent_initiative=False)) == ""
+
+
+def test_her_name_stays_when_she_says_it():
+    from discord_dfy.memory import first_person
+
+    assert first_person("我叫小鲸鱼，小鲸鱼爱看云") == "我叫小鲸鱼，我爱看云"
 
 
 async def test_she_rewrites_her_self_portrait_and_keeps_the_old_one(make_agent, agent_settings):
