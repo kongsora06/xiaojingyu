@@ -50,8 +50,8 @@ def key(entry: str) -> str:
 
 
 def first_person(note: str) -> str:
-    """Her memory speaks of her as "我", never by name."""
-    return note.replace("小鲸鱼", "我")
+    """Her memory speaks of her as "我", never by name (but "我叫小鲸鱼" keeps it)."""
+    return re.sub(r"(?<![叫是])小鲸鱼", "我", note)
 
 
 def add_memory_notes(path, notes: dict[str, list[str]]) -> int:

@@ -98,6 +98,20 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "recall",
+            "description": (
+                "翻你和老爹以前私聊的原话，!new 之前的旧对话也在。"
+                "when 是某一天（2026-10-24）或某个月（2026-10），query 是关键词；至少给一个。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"when": {"type": "string"}, "query": {"type": "string"}},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "room_list",
             "description": (
                 "看看你房间里（只属于你的文件夹）都有什么。"

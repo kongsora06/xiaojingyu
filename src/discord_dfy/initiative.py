@@ -20,11 +20,11 @@ import re
 import time
 import uuid
 from contextlib import nullcontext
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 
 from openai import APIError
 
-from .config import parse_quiet_hours
+from .config import in_peak, parse_quiet_hours
 from .host_agent import fit, loads, request_messages, save_json
 from .host_tools import ToolError, describe_call, monitor_text, what_she_did
 from .images import file_block
@@ -35,11 +35,8 @@ CHECK_SECONDS = 600
 # The gap stops doubling here (unanswered messages).
 MAX_GAP_SECONDS = 8 * 3600
 WEEKDAYS = "一二三四五六日"
-# Peak hours, Beijing time (no daylight saving): weekdays 09-12 and 14-18.
-BEIJING = timezone(timedelta(hours=8))
-PEAK_HOURS = ((9, 12), (14, 18))
 # Tool steps she may take on her own in one quiet spell.
-IDLE_STEPS = 8
+IDLE_STEPS = 15
 # Her last reply when she does not want to message him.
 SKIP = "（不找他）"
 SKIP_MARK = re.compile(r"[（(]\s*不找他\s*[)）]")
@@ -68,11 +65,6 @@ def in_quiet_hours(spec: str, moment: datetime) -> bool:
     start, end = hours
     minute = moment.hour * 60 + moment.minute
     return start <= minute < end if start <= end else minute >= start or minute < end
-
-
-def in_peak(moment: datetime) -> bool:
-    here = moment.astimezone(BEIJING)
-    return here.weekday() < 5 and any(start <= here.hour < end for start, end in PEAK_HOURS)
 
 
 def ago(seconds: float) -> str:

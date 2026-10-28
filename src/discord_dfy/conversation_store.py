@@ -99,6 +99,15 @@ class ConversationStore:
         async with self.lock:
             return await self._current(channel_id)
 
+    async def everything(self, channel_id: int) -> list[tuple[float, dict]]:
+        """Every stored message of every conversation, oldest first (for looking back)."""
+        async with self.lock:
+            cursor = await self.db.execute(
+                "SELECT created_at, message FROM agent_messages WHERE channel_id=? ORDER BY id",
+                (channel_id,),
+            )
+            return [(row[0], json.loads(row[1])) for row in await cursor.fetchall()]
+
     async def channels(self) -> list[int]:
         """Channels that have ever had a conversation (for the owner: their DM)."""
         async with self.lock:
