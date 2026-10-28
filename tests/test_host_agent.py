@@ -1158,7 +1158,9 @@ async def test_reaches_out_after_a_quiet_spell_and_waits_longer_unanswered(make_
     ask = provider.bodies[1]
     assert ask["tools"] == provider.bodies[0]["tools"]  # Same tools: the prefix is shared.
     nudge = ask["messages"][-1]["content"]
-    assert nudge.startswith("[提示] 这不是老爹发的消息") and "4 小时" in nudge
+    # Her reply was stored a moment after his message: just under four hours.
+    assert nudge.startswith("[提示] 这不是老爹发的消息") and "说话是 3 小时 前" in nudge
+    assert "主动找过他" not in nudge  # No counting: she sends what she wants to.
     assert ask["messages"][0] == provider.bodies[0]["messages"][0]  # Same cached prefix.
     # Unanswered: no limit on how many, but the gap doubles (30 min -> 1 h).
     clock.t = first + 45 * 60
@@ -1495,7 +1497,7 @@ async def test_in_a_quiet_spell_she_does_her_own_things(make_agent, agent_settin
     clock.t += 2 * HOUR
     assert not await initiative.consider() and sent == []
     look, after = provider.bodies[1], provider.bodies[2]
-    assert "这一会儿是你自己的时间" in look["messages"][-1]["content"]
+    assert "这会儿是你自己的时间" in look["messages"][-1]["content"]
     assert look["tools"] == provider.bodies[0]["tools"]
     results = [m["content"] for m in after["messages"] if m["role"] == "tool"]
     assert results[:2] == ["写好了", "写好了：诗/等.md"] and results[2].startswith(
