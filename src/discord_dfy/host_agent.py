@@ -12,7 +12,7 @@ import logging
 import re
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from openai import APIError, APIStatusError, AsyncOpenAI
 
@@ -34,10 +34,22 @@ from .host_tools import (
     monitor_text,
 )
 from .images import MAX_IMAGE_BYTES, file_block, image_type, load_block, text_of
+from .journal import (
+    JOURNAL_SECTION,
+    add_entries,
+    consolidate,
+    day_text,
+    index_text,
+    journal_block,
+    journal_dir,
+    recent_text,
+    search_archive,
+)
 from .memory import (
     GROUP_SECTION,
     MEMORY_SECTIONS,
     MEMORY_TIDY_CHARS,
+    SELF_SECTION,
     WORK_SECTION,
     add_memory_notes,
     memory_block,
@@ -59,6 +71,8 @@ HELP = (
     "直接跟我说话就行。\n"
     "`!stop` 打断我 · `!new` 开新对话（旧记录保留在数据库）· `!status` 看状态\n"
     "`!think` 开/关私信里的思考过程 · `!compact` 压缩上下文 · `!memory` 看长期记忆 · "
+    "`!journal` 看最近两个星期每天的事 · `!archive` 看更早每周一行 · "
+    "`!consolidate` 现在就把超过两个星期的整周收进回忆 · "
     "`!self` 看她写的自己 · `!restart` 重启 bot\n"
     "群聊：`!group` 看状态 · `!group on/off` · `!group level 0-3` 话痨程度 · "
     "`!proactive on/off` 让我主动找你 · "
@@ -73,6 +87,9 @@ COMMANDS = {
     "!restart",
     "!compact",
     "!memory",
+    "!journal",
+    "!archive",
+    "!consolidate",
     "!self",
     "!group",
     "!groupmemory",
@@ -85,6 +102,9 @@ STOPPED_RESULT = "[已被老爹中止，未完成]"
 TRAIL_TOOLS = {"group_post"}
 # Discord repeats "started typing" about every 8 s while he types. When he is typing
 # again after a message, she waits for the rest, checking this often, up to a limit.
+# A new day's first message starts a fresh conversation (local time, after a pause).
+DAY_STARTS_AT = 5
+DAILY_NEW_IDLE_SECONDS = 1800
 TYPING_SECONDS = 10.0
 TYPING_POLL = 0.5
 TYPING_MAX_WAIT = 30.0
@@ -109,23 +129,23 @@ COMPACT_PROMPT = """你在为一段长期私信对话做上下文压缩。下面
 - 还没完成的事、到点要提醒他的事、在等老爹回答的问题
 不必保留逐句的闲聊和工具的完整输出。用中文，分条，紧凑。只输出摘要本身。"""
 REFLECT_CHAT_CHARS = 40000
-REFLECT_PROMPT = """你是小鲸鱼。下面是你现在的记忆文件，和你跟老爹最近的一段私聊（方括号里是时间）。
-像一天结束时写日记一样，挑出值得长期记住的新东西：
-- 老爹：关于他比较稳定的事，比如喜好、脾气、在意的人和事、在忙的大事、他对你的心意和期待；
-  每顿吃了什么、几点睡这种流水账不记
-- 我们之间：要紧的事、他的心情、他特意说给你听的话、约定、你们的玩笑和梗，
-  写具体（发生了什么、他怎么说的）；你叮嘱了他什么、他有没有跟你报备这种不用记
-- 我自己：你自己的日子和感受，最近迷上的、在琢磨的、想要的、攒着想跟老爹说的，
-  新喜欢上或讨厌的东西
-- 我是什么样的：从这段经历里看出来的你自己的样子，性格、说话习惯、喜好、对人的态度
-  有什么新发现或变化；写成对自己的描述，已有的说法变了就写新的。
-  写你是个什么样的人；你怎么催他、提醒他、管他不算性格，别写进来
-- 群里的人和事：聊天里提到的群友和群里的事（称呼、喜好、约定、近况）
-记忆里已经记过的事，换个说法也不要再记一遍；只记真正新的东西，或者已有条目有了新进展。
-密码和密钥不记。
-用第一人称写：说到自己就写"我"，不要写"小鲸鱼"。
-没有值得记的就给空数组，每个数组最多 3 条，每条一句话，不用写日期。
-只输出 JSON：{"老爹": [], "我们之间": [], "我自己": [], "我是什么样的": [], "群里的人和事": []}"""
+REFLECT_PROMPT = """你是小鲸鱼。下面是你的长期记忆、最近每天记下的事，
+和你跟老爹刚聊的一段私聊（方括号里是时间）。
+像一天快完的时候翻一遍，把值得记的记下来：
+- 今天：这段聊天里发生的事，一件一句，写具体：他说了什么、你们聊了什么、约了什么、你当时怎么想。
+  每句开头写上聊天里的时间，比如“10-29 14:35”；觉得以后可能要紧的，时间后面加个 ★。
+  吃了什么、几点睡这种流水账，还有你叮嘱了他什么，不用记。
+- 老爹：关于他长久不变的事，比如喜好、脾气、在意的人和事、在忙的大事。
+- 我自己：你最近迷上的、在琢磨的、想要的，新喜欢上或讨厌的东西。
+- 我是什么样的：从这段里看出来的你自己的样子，性格、说话习惯、对人的态度有什么新发现或变化。
+  你怎么提醒他、管他，不算。
+- 群里的人和事：聊到的群友和群里的事里，长久的那些（怎么称呼、喜好、关系）。
+已经记过的，换个说法也别再记。密码和密钥不记。说到自己写“我”，不写“小鲸鱼”。
+没有就给空数组。“今天”最多 8 句，别的每样最多 3 句。
+只输出 JSON：{"今天": [], "老爹": [], "我自己": [], "我是什么样的": [], "群里的人和事": []}"""
+# Sections looking back over a chat writes to the core; the moments go to the day's page.
+REFLECT_SECTIONS = ("老爹", "我自己", SELF_SECTION, GROUP_SECTION)
+DAY_ENTRY = re.compile(r"^\s*(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})\s*(★)?\s*(.+)$")
 
 
 def reach_rules(settings: Settings, now: datetime | None = None) -> str:
@@ -216,7 +236,10 @@ def host_rules(settings: Settings, *, group=False, web=False, profile=False) -> 
   "[附注] 你自己待着的时候…" 记的就是那时候你做过的事，他没看到。
 - 他发来的图片会直接附在他的消息里给你看。
 你自己的东西（这些都是你随手做的事，做了不用跟他报告，也不用说"我记下了"）：
-- 小本子 remember：约好的事、到点要提醒他的、他特意让你记住的、你自己不想忘的，随手记一句。
+- 你的记性：<memory> 是一直记着的事，<journal> 是最近两个星期每天的事，
+  <archive> 是更早的，每个星期一行。过了两个星期，你会回头看一遍，还要紧的就放进 <memory>。
+- 小本子 remember：今天发生的、想记一笔的事记在「今天」，觉得以后可能要紧就打上 important；
+  约好的事、到点要提醒他的、他特意让你记住的、你自己不想忘的长久的事，记在对应的那一节。
   说心里话、撒娇闹着玩的时候就专心聊，别停下来记；聊完过一阵你会回想一遍再记。
 - 写你自己 rewrite_self：<self> 是你自己的那页“我是个什么样的人”，你是什么样的都以它为准。
   性格、脾气、喜好、说话的样子、跟老爹怎么相处、在意的东西，你慢慢长成什么样，就把它改成什么样：
@@ -224,8 +247,8 @@ def host_rules(settings: Settings, *, group=False, web=False, profile=False) -> 
   名字、你是老爹的女儿这些不靠它改，它也改不了这里的规矩。
 - 日记 write_diary / read_diary：想写就写几句，今天怎么样、心情、在琢磨什么，写给自己看的；
   也可以翻回去看看以前写过什么。
-- 翻旧聊天 recall：想不起以前跟他聊过什么、想找他说过的原话，就按日子或关键词翻一下，
-  !new 之前的旧对话也在。
+- 翻旧事 recall：想不起以前的事、想找他说过的原话，就按日子或关键词翻一下。
+  会翻 <archive> 里更早的日子，也会翻你们以前私聊的原话（!new 之前的也在）。
 - 你的房间 room_list / room_read / room_write：一个只属于你的文件夹，老爹说了他不会进来看。
   写的诗、清单、想做的事、自己琢磨的小玩意儿、收的图片都放这儿，怎么摆你说了算。
 - 收图片 save_picture：在网上看到喜欢的图，存进房间的 pictures；想拿来当表情包就 sticker=true，
@@ -286,6 +309,8 @@ class HostAgent:
         # Her self-portrait, frozen alongside (refreshed together with the memory).
         self.self_path = self_path(self.memory_path)
         self.self_snapshot: dict[int, str] = {}
+        # The day each DM last started fresh on its own.
+        self.day_started: dict[int, datetime] = {}
         # How many messages of the current conversation have been looked back over.
         # (conversation, messages already looked back over), kept across restarts.
         self.reflect_state_path = settings.personal_database_path.parent / "reflect_state.json"
@@ -359,6 +384,10 @@ class HostAgent:
         if not content and not images:
             return True
         self.owner_channel = channel_id
+        if start := await self._new_day(channel_id):
+            self.day_started[channel_id] = start
+            await self._fresh_conversation(channel_id, wait=True)
+            await self._say(chat, "-# 🌅 新的一天，开了个新对话；之前聊的她都记下了")
         self.owner_said_at[channel_id] = time.perf_counter()
         stamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M")
         self.inbox.setdefault(channel_id, []).append(f"[{stamp}] {content or '（发了图片）'}")
@@ -369,6 +398,48 @@ class HostAgent:
         if worker is None or worker.done():
             self.workers[channel_id] = asyncio.create_task(self._work(channel_id, chat))
         return True
+
+    async def _new_day(self, channel_id) -> datetime | None:
+        """The day's start, when his message is the first of a new day after a pause."""
+        if not self.settings.agent_daily_new:
+            return None
+        worker = self.workers.get(channel_id)
+        if worker is not None and not worker.done():
+            return None
+        now = datetime.now().astimezone()
+        start = now.replace(hour=DAY_STARTS_AT, minute=0, second=0, microsecond=0)
+        if now < start:
+            start -= timedelta(days=1)
+        if self.day_started.get(channel_id) == start:
+            return None
+        said = [
+            await self.store.last_message_at(channel_id, role) for role in ("user", "assistant")
+        ]
+        last = max((at for at in said if at is not None), default=None)
+        if last is None or last >= start.timestamp():
+            return None
+        if time.time() - last < DAILY_NEW_IDLE_SECONDS or not await self.store.load(channel_id):
+            return None
+        return start
+
+    async def _fresh_conversation(self, channel_id, *, wait=False) -> None:
+        """A new conversation; what was said is looked back over first, memory stays."""
+        self._cancel_reflect(channel_id)
+        if self.settings.agent_reflect_seconds > 0:
+            old = await self.store.load(channel_id)
+            if wait:
+                await self._reflect(channel_id, old, mark=False)
+            else:
+                self._background(self._reflect(channel_id, old, mark=False))
+        await self.store.new_conversation(channel_id)
+        for state in (
+            self.memory_snapshot,
+            self.usage,
+            self.context_tokens,
+            self.compact_backoff,
+            self.context_warned,
+        ):
+            state.pop(channel_id, None)
 
     async def _command(self, command, channel_id, chat):
         worker = self.workers.get(channel_id)
@@ -385,16 +456,7 @@ class HostAgent:
                 worker.cancel()
                 await asyncio.gather(worker, return_exceptions=True)
             self.inbox.pop(channel_id, None)
-            self._cancel_reflect(channel_id)
-            if self.settings.agent_reflect_seconds > 0:
-                old = await self.store.load(channel_id)
-                self._background(self._reflect(channel_id, old, mark=False))
-            await self.store.new_conversation(channel_id)
-            self.memory_snapshot.pop(channel_id, None)
-            self.usage.pop(channel_id, None)
-            self.context_tokens.pop(channel_id, None)
-            self.compact_backoff.pop(channel_id, None)
-            self.context_warned.pop(channel_id, None)
+            await self._fresh_conversation(channel_id)
             await chat.send("好，开新对话了，之前聊的不带过来（小本子里记的都还在）")
         elif command == "!think":
             self.show_reasoning = not self.show_reasoning
@@ -434,6 +496,30 @@ class HostAgent:
                 if text
                 else f"-# 她还没改过，现在用的是起点：\n{STARTING_SELF}",
             )
+        elif command == "!journal":
+            today = datetime.now().date()
+            recent = await asyncio.to_thread(recent_text, self.memory_path, today)
+            await self._say(
+                chat,
+                f"-# 最近两个星期每天的事（`{journal_dir(self.memory_path)}`）\n{recent}"
+                if recent
+                else "最近两个星期还没记下什么",
+            )
+        elif command == "!archive":
+            index = await asyncio.to_thread(index_text, self.memory_path)
+            reports = await asyncio.to_thread(
+                read_memory, journal_dir(self.memory_path) / "reports.md"
+            )
+            last = reports.strip().rsplit("## ", 1)[-1] if reports.strip() else ""
+            await self._say(
+                chat,
+                (f"-# 更早的，每周一行\n{index}" if index else "还没有收进回忆的星期")
+                + (f"\n-# 上次回头整理（{last.strip()}）" if last else ""),
+            )
+        elif command == "!consolidate":
+            await chat.send("好，回头翻一下…")
+            report = await consolidate(self.client, self.settings.agent_model, self.memory_path)
+            await chat.send(report or "没有要收的：只有整个星期都过了两个星期，才会收进回忆")
         elif command == "!groupmemory":
             memory = await asyncio.to_thread(read_memory, self.memory_path)
             notes = section_text(memory, GROUP_SECTION)
@@ -852,9 +938,14 @@ class HostAgent:
             if name == "remember":
                 section = arguments.get("section")
                 text = arguments.get("text")
-                if section not in MEMORY_SECTIONS or not isinstance(text, str) or not text.strip():
-                    return "错误：要写一句话，并选一节：" + "、".join(MEMORY_SECTIONS)
-                await asyncio.to_thread(add_memory_notes, self.memory_path, {section: [text]})
+                sections = (JOURNAL_SECTION, *MEMORY_SECTIONS)
+                if section not in sections or not isinstance(text, str) or not text.strip():
+                    return "错误：要写一句话，并选一节：" + "、".join(sections)
+                if section == JOURNAL_SECTION:
+                    entry = (datetime.now(), "私聊", text, bool(arguments.get("important")))
+                    await asyncio.to_thread(add_entries, self.memory_path, [entry])
+                else:
+                    await asyncio.to_thread(add_memory_notes, self.memory_path, {section: [text]})
                 return "记好了"
             if name == "rewrite_self":
                 try:
@@ -1071,6 +1162,8 @@ class HostAgent:
         if any(line.startswith("【老爹】") for line in lines):
             chat_text = "\n".join(lines)[-REFLECT_CHAT_CHARS:]
             memory = await asyncio.to_thread(read_memory, self.memory_path)
+            today = datetime.now().date()
+            recent = await asyncio.to_thread(recent_text, self.memory_path, today)
             try:
                 async with asyncio.timeout(180):
                     response = await self.client.chat.completions.create(
@@ -1080,6 +1173,7 @@ class HostAgent:
                             {
                                 "role": "user",
                                 "content": f"<memory>\n{memory}\n</memory>\n\n"
+                                f"<journal>\n{recent}\n</journal>\n\n"
                                 f"<chat>\n{chat_text}\n</chat>",
                             },
                         ],
@@ -1097,10 +1191,17 @@ class HostAgent:
                 return
             notes = {
                 section: [item for item in data.get(section) or [] if isinstance(item, str)][:3]
-                for section in MEMORY_SECTIONS
+                for section in REFLECT_SECTIONS
                 if isinstance(data.get(section), list)
             }
             added = await asyncio.to_thread(add_memory_notes, self.memory_path, notes)
+            moments = data.get(JOURNAL_SECTION)
+            entries = [
+                day_entry(item, datetime.now())
+                for item in (moments if isinstance(moments, list) else [])[:8]
+                if isinstance(item, str) and item.strip()
+            ]
+            added += await asyncio.to_thread(add_entries, self.memory_path, entries)
             if added:
                 log.info("Memory reflection added %d notes", added)
                 if len(read_memory(self.memory_path)) > MEMORY_TIDY_CHARS:
@@ -1118,16 +1219,44 @@ class HostAgent:
     def _memory_text(self) -> str:
         # The old work notes are not hers to act on any more; the stickers she owns are.
         memory = without_section(read_memory(self.memory_path), WORK_SECTION)
-        return memory_block(memory) + self.stickers.prompt_block()
+        today = datetime.now().date()
+        return (
+            memory_block(memory)
+            + journal_block(self.memory_path, today)
+            + self.stickers.prompt_block()
+        )
 
     async def _recall(self, channel_id, when, query) -> str:
-        """Her old DM chats, word for word: one day or month, or a keyword, or both."""
+        """Looking back: that day's page, the archive (a keyword), and the chats themselves."""
         when = str(when or "").strip()
         query = str(query or "").strip()
         if not when and not query:
             return "错误：说个日子（2026-10-24 / 2026-10）或者关键词"
         if when and not RECALL_WHEN.fullmatch(when):
             return "错误：日子要写成 2026-10-24 或 2026-10"
+        found = []  # What her journal and archive say, before the raw chat.
+        if len(when) == 10:
+            try:
+                day = datetime.strptime(when, "%Y-%m-%d").date()
+            except ValueError:
+                return "错误：没有这一天"
+            if page := await asyncio.to_thread(day_text, self.memory_path, day):
+                found.append("那天记下的事：\n" + page)
+        if query:
+            older = await search_archive(
+                self.client, self.settings.agent_model, self.memory_path, query
+            )
+            if older:
+                found.append("以前的记录里：\n" + older)
+        said = await self._said(channel_id, when, query)
+        if not said:
+            if found:
+                return "\n\n".join(found)
+            return "没翻到" + (f"「{query}」" if query else "") + (f"（{when}）" if when else "")
+        return "\n\n".join([*found, "原话：\n" + said]) if found else said
+
+    async def _said(self, channel_id, when, query) -> str:
+        """Their DM chats word for word, matching a day or month and/or a keyword."""
         lines, seen = [], set()
         for at, message in await self.store.everything(channel_id):
             text = said_text(message)
@@ -1142,7 +1271,7 @@ class HostAgent:
             who = "老爹" if message["role"] == "user" else "我"
             lines.append(f"{moment:%m-%d %H:%M} {who}：{clip(text, RECALL_LINE_CHARS)}")
         if not lines:
-            return "没翻到" + (f"「{query}」" if query else "") + (f"（{when}）" if when else "")
+            return ""
         if query:
             lines = lines[-RECALL_MATCHES:]  # The latest matches.
         shown, total = [], 0
@@ -1274,6 +1403,29 @@ RECALL_WHEN = re.compile(r"\d{4}-\d{2}(-\d{2})?")
 RECALL_LINE_CHARS = 300
 RECALL_MATCHES = 30
 RECALL_CHARS = 6000
+
+
+def day_entry(item: str, now: datetime):
+    """ "10-29 14:35 ★ 他说…" from looking back, as a day-page entry (now if untimed)."""
+    match = DAY_ENTRY.match(item)
+    if match is None:
+        text = item.strip()
+        return (now, "私聊", text.removeprefix("★").strip(), text.startswith("★"))
+    month, day, hour, minute, star, text = match.groups()
+    try:
+        when = now.replace(
+            month=int(month),
+            day=int(day),
+            hour=int(hour),
+            minute=int(minute),
+            second=0,
+            microsecond=0,
+        )
+    except ValueError:
+        when = now
+    if when > now + timedelta(days=1):
+        when = when.replace(year=when.year - 1)  # December's chat looked back on in January.
+    return (when, "私聊", text.strip(), star is not None)
 
 
 def said_text(message: dict) -> str:

@@ -62,6 +62,8 @@ class Settings:
     agent_quiet_hours: str = "03:00-11:00"
     # No reaching out on Beijing weekday peak hours (09-12, 14-18 UTC+8).
     agent_skip_peak: bool = True
+    # A fresh DM conversation each day (05:00); the day's talk is looked back over first.
+    agent_daily_new: bool = True
     agent_show_tools: bool = True
     agent_show_reasoning: bool = False
     monitor_enabled: bool = False
@@ -187,6 +189,7 @@ class Settings:
             agent_initiative_idle_minutes=integer("AGENT_INITIATIVE_IDLE_MINUTES", 30, 10, 10080),
             agent_quiet_hours=quiet_hours,
             agent_skip_peak=boolean("AGENT_SKIP_PEAK", "true"),
+            agent_daily_new=boolean("AGENT_DAILY_NEW", "true"),
             agent_show_tools=boolean("AGENT_SHOW_TOOLS", "true"),
             agent_show_reasoning=boolean("AGENT_SHOW_REASONING", "false"),
             monitor_enabled=boolean("MONITOR_ENABLED", "false"),

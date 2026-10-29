@@ -77,7 +77,9 @@ Fetch API).
 | `!stop` / `!new` | Interrupt the current task / start a fresh conversation |
 | `!status` | Context size, token usage, settings |
 | `!compact` | Summarize the older part of the conversation |
-| `!memory` / `!groupmemory` | Show her memory / its group section |
+| `!memory` / `!groupmemory` | Show her long-term memory / its group section |
+| `!journal` / `!archive` | The last two weeks, day by day / one line per older week |
+| `!consolidate` | Fold weeks older than two weeks into the archive now |
 | `!self` | Show the self-portrait she wrote |
 | `!think` | Show or hide her thinking in DMs |
 | `!group`, `!group on/off`, `!group level 0-3`, `!quiet 30m` | Group chat controls |
@@ -87,7 +89,7 @@ Fetch API).
 ## Data
 
 Everything personal stays local and out of Git (`.gitignore` covers `.env` and `data/`):
-`data/memory.md` (her memory), `data/self.md` and `data/self-history/` (who she says she is,
+`data/memory.md` (her long-term memory), `data/memory/` (a page per day, weekly summaries and their index), `data/self.md` and `data/self-history/` (who she says she is,
 rewritten by her), `data/room/` (her room and diary — hers alone),
 `data/personal.sqlite3` (DM history), `data/bot.sqlite3` (group messages and decision
 metadata), `data/stickers/`, `data/dm_images/`, logs and monitor events. Set `STORE_MESSAGES=false` to stop storing group messages; the bot still reads recent
@@ -106,7 +108,8 @@ src/discord_dfy/
   host_agent.py          Owner-DM loop, commands, texting delivery, looking back into memory
   host_tools.py          Her things: notebook, diary, room, saving pictures
   initiative.py          Reaching out to the owner first
-  memory.py              The shared memory file: notes, sections, tidying
+  memory.py              The shared long-term memory: notes, sections, tidying
+  journal.py             Day pages, weekly archive, looking back, searching old weeks
   persona.md, persona.py Fixed persona and host identity rules
   portrait.py, self_start.md  Her self-portrait and its starting version
   profile.py             Discord status and profile changes
