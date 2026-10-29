@@ -274,3 +274,16 @@ def test_unicode_reply_chunks_preserve_text_and_discord_budget(text):
     chunks = split_reply(text)
     assert "".join(chunks) == text
     assert all(len(chunk.encode("utf-16-le")) // 2 <= 1900 for chunk in chunks)
+
+
+async def test_reaching_out_is_delivered_like_her_replies(bot, settings):
+    bot.settings = replace(settings, owner_discord_user_id=20)
+    channel = SimpleNamespace(id=77, send=AsyncMock())
+    bot.get_user = MagicMock(return_value=SimpleNamespace(dm_channel=channel))
+    bot.personal = SimpleNamespace(deliver=AsyncMock(), note_outgoing=AsyncMock())
+    text = "老爹，我查到个东西\n\n[表情包：我坐好了]"
+    assert await bot.message_owner(text, source="self")
+    chat, sent = bot.personal.deliver.await_args.args
+    assert chat.channel is channel and sent == text  # Split into texts and stickers there.
+    bot.personal.note_outgoing.assert_awaited_once_with(77, text, "self")
+    channel.send.assert_not_awaited()
