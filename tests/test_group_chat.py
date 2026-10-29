@@ -20,6 +20,7 @@ from discord_dfy.group_chat import (
     parse_plan,
     pick_channel,
 )
+from discord_dfy.journal import day_path, journal_dir
 from discord_dfy.monitor_protocol import Publisher
 
 CHANNEL = 100
@@ -602,13 +603,13 @@ async def test_group_side_shares_her_one_memory_and_knows_the_dms(make_group, gr
     assert "悄悄话" in system and "同一个你" in system
     assert "dm_recent" not in provider.payload(0)  # The DM text itself stays in the DMs.
     memory = group_settings.agent_memory_path.read_text(encoding="utf-8")
-    assert memory.count("阿明不吃香菜") == 1
-    assert "\n## 群里的人和事\n- 阿明不吃香菜（" in memory and memory.endswith(
-        "## 做事备忘\n- 用 uv\n"
-    )
+    assert "阿明不吃香菜" not in memory  # Group notes go to the day's page first.
+    page = day_path(group_settings.agent_memory_path, datetime.now().date())
+    assert page.read_text(encoding="utf-8").count("[群里] 阿明不吃香菜") == 1
     group.observe(CHANNEL, line("@小鲸鱼 点外卖"), mentioned=True, guild_id=GUILD)
     await settle(group)
-    assert "- 阿明不吃香菜（" in provider.bodies[1]["messages"][0]["content"]
+    system = provider.bodies[1]["messages"][0]["content"]
+    assert "<journal>" in system and "[群里] 阿明不吃香菜" in system
     assert group_settings.agent_memory_path.read_text(encoding="utf-8") == memory
 
 
@@ -919,3 +920,30 @@ async def test_she_waits_for_someone_who_is_typing(make_group):
     clock[0] += 1
     must_cap = group_chat.TYPING_MAX_WAIT["must"]
     assert group._delay(window) == pytest.approx(100.0 + must_cap - clock[0])
+
+
+async def test_one_look_back_through_the_archive_then_the_model_answers(make_group, group_settings):
+    weeks = journal_dir(group_settings.agent_memory_path) / "weeks"
+    weeks.mkdir(parents=True)
+    (weeks / "2026-W45.md").write_text("# 2026-W45\n\nEpric 说要请大家吃饭。\n", encoding="utf-8")
+    provider = Provider(
+        {**plan(), "recall": "请吃饭"}, "11-03 Epric 说要请大家吃饭", plan(["你说过要请客的"])
+    )
+    group = make_group(provider)
+    group.observe(CHANNEL, line("@小鲸鱼 我说过啥来着"), mentioned=True)
+    await settle(group)
+    first, second = provider.payload(0), provider.payload(2)
+    assert first["can_recall"] is True and "recall" not in first
+    assert "「请吃饭」" in provider.bodies[1]["messages"][0]["content"]
+    assert second["can_recall"] is False and second["can_search"] is False
+    assert second["recall"] == {"query": "请吃饭", "found": "11-03 Epric 说要请大家吃饭"}
+    assert group.transport.sent[-1][1] == "你说过要请客的"
+
+
+async def test_without_an_archive_a_look_back_is_skipped(make_group):
+    provider = Provider({**plan(["不记得了"]), "recall": "x"})
+    group = make_group(provider)
+    group.observe(CHANNEL, line("@小鲸鱼 ?"), mentioned=True)
+    await settle(group)
+    assert provider.payload()["can_recall"] is False and len(provider.bodies) == 1
+    assert group.transport.sent[-1][1] == "不记得了"

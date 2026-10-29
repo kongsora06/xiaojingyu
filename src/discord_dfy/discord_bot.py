@@ -306,6 +306,18 @@ class DiscordAgent(discord.Client):
             await DMChat(channel).send(text)
         return True
 
+    async def notice_owner(self, text: str) -> None:
+        """A small note from the bot itself (not her words, not kept in the chat)."""
+        owner = self.settings.owner_discord_user_id
+        if owner is None or self.user is None:
+            return
+        try:
+            user = self.get_user(owner) or await self.fetch_user(owner)
+            channel = user.dm_channel or await user.create_dm()
+            await DMChat(channel).send(text)
+        except discord.HTTPException:
+            log.warning("Owner notice failed")
+
     @property
     def restart_marker(self):
         return self.settings.personal_database_path.parent / "restart.json"

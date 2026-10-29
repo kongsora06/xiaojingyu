@@ -31,6 +31,7 @@ from discord_dfy.host_agent import (
 )
 from discord_dfy.host_tools import Room, ToolError, describe_call, download_image
 from discord_dfy.initiative import SELF_TAG, Initiative, ago, in_peak, in_quiet_hours
+from discord_dfy.journal import add_entries, day_path, journal_dir
 from discord_dfy.monitor_protocol import Publisher
 from discord_dfy.portrait import STARTING_SELF
 from discord_dfy.service import AgentService
@@ -952,7 +953,7 @@ def test_memory_notes_go_under_their_sections_without_duplicates(tmp_path):
 
 
 async def test_quiet_chat_is_looked_back_over_once(make_agent, agent_settings):
-    notes = {"老爹": [], "我们之间": ["老爹加班到九点，想换工作"], "我自己": []}
+    notes = {"今天": ["★ 老爹加班到九点，想换工作"], "老爹": ["老爹在想换工作"], "我自己": []}
     provider = Provider(
         completion("辛苦啦"),
         completion(json.dumps(notes, ensure_ascii=False)),
@@ -969,7 +970,9 @@ async def test_quiet_chat_is_looked_back_over_once(make_agent, agent_settings):
     looked_at = reflect["messages"][1]["content"]
     assert "【老爹】[" in looked_at and "【我】辛苦啦" in looked_at
     memory = agent_settings.agent_memory_path.read_text(encoding="utf-8")
-    assert "## 我们之间\n- 老爹加班到九点，想换工作（" in memory
+    assert "## 老爹\n- 老爹在想换工作（" in memory and "加班" not in memory
+    page = day_path(agent_settings.agent_memory_path, datetime.now().date())
+    assert "[私聊] ★ 老爹加班到九点，想换工作" in page.read_text(encoding="utf-8")
     await say(agent, chat, "睡了")
     agent._cancel_reflect(CHANNEL)
     await agent._reflect(CHANNEL, await agent.store.load(CHANNEL))
@@ -1618,3 +1621,98 @@ async def test_she_rewrites_her_self_portrait_and_keeps_the_old_one(make_agent, 
     group = GroupChat(agent_settings, agent.client, GroupTransport())
     assert group.self_path == path
     await group.close()
+
+
+async def test_remember_puts_todays_things_on_the_days_page(make_agent, agent_settings):
+    agent = await make_agent(Provider())
+    arguments = {"text": "小鲸鱼答应陪老爹看海", "section": "今天", "important": True}
+    assert await agent._run_tool("remember", json.dumps(arguments), Chat(), CHANNEL) == "记好了"
+    page = day_path(agent_settings.agent_memory_path, datetime.now().date())
+    assert "[私聊] ★ 我答应陪老爹看海" in page.read_text(encoding="utf-8")
+    assert not agent_settings.agent_memory_path.exists()  # The core is for what stays true.
+    wrong = await agent._run_tool(
+        "remember", json.dumps({"text": "x", "section": "别处"}), Chat(), CHANNEL
+    )
+    assert wrong.startswith("错误") and "今天" in wrong
+
+
+def test_looked_back_moments_keep_their_time():
+    now = datetime(2026, 10, 30, 9)
+    assert host_agent.day_entry("10-29 14:35 ★ 他说想我", now) == (
+        datetime(2026, 10, 29, 14, 35),
+        "私聊",
+        "他说想我",
+        True,
+    )
+    assert host_agent.day_entry("12-31 23:00 跨年", datetime(2027, 1, 1, 1))[0] == datetime(
+        2026, 12, 31, 23
+    )
+    assert host_agent.day_entry("★ 没写时间", now) == (now, "私聊", "没写时间", True)
+
+
+async def test_recall_looks_in_the_archive_and_the_days_page(make_agent, agent_settings):
+    memory = agent_settings.agent_memory_path
+    weeks = journal_dir(memory) / "weeks"
+    weeks.mkdir(parents=True)
+    (weeks / "2026-W45.md").write_text("# 2026-W45\n\n老爹答应带我去看海。\n", encoding="utf-8")
+    add_entries(memory, [(datetime(2026, 10, 24, 21), "私聊", "老爹说想我", True)])
+    agent = await make_agent(Provider(completion("11-02 老爹答应带我去看海")))
+
+    async def recall(**arguments):
+        return await agent._run_tool("recall", json.dumps(arguments), Chat(), CHANNEL)
+
+    assert await recall(query="看海") == "以前的记录里：\n11-02 老爹答应带我去看海"
+    day = await recall(when="2026-10-24")
+    assert day == "那天记下的事：\n# 2026-10-24\n- 21:00 [私聊] ★ 老爹说想我"
+    assert await recall(when="2026-02-30") == "错误：没有这一天"
+
+
+async def test_a_new_day_starts_a_fresh_conversation(make_agent, store):
+    provider = Provider(completion("晚安"), completion("早呀"), completion("嗯"))
+    agent = await make_agent(provider)
+    chat = Chat()
+    await say(agent, chat, "睡了")
+    # Pretend that was last night, before today's 05:00.
+    now = datetime.now().astimezone()
+    start = now.replace(hour=5, minute=0, second=0, microsecond=0)
+    if now < start:
+        start -= timedelta(days=1)
+    await store.db.execute("UPDATE agent_messages SET created_at=?", (start.timestamp() - 3600,))
+    await store.db.commit()
+    first = await store.current(CHANNEL)
+    await say(agent, chat, "早")
+    assert await store.current(CHANNEL) == first + 1
+    assert any("新的一天" in text for text in chat.sent)
+    assert [m["role"] for m in provider.bodies[1]["messages"]] == ["system", "user"]
+    await say(agent, chat, "再说一句")  # Same day: same conversation.
+    assert await store.current(CHANNEL) == first + 1
+
+
+async def test_daily_new_can_be_turned_off(make_agent, store):
+    provider = Provider(completion("晚安"), completion("早呀"))
+    agent = await make_agent(provider, agent_daily_new=False)
+    chat = Chat()
+    await say(agent, chat, "睡了")
+    await store.db.execute("UPDATE agent_messages SET created_at=?", (time.time() - 3 * 86400,))
+    await store.db.commit()
+    first = await store.current(CHANNEL)
+    await say(agent, chat, "早")
+    assert await store.current(CHANNEL) == first and len(provider.bodies[1]["messages"]) == 4
+
+
+async def test_memory_commands(make_agent, agent_settings):
+    agent = await make_agent(Provider())
+    chat = Chat()
+    for command in ("!journal", "!archive", "!consolidate"):
+        await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content=command, chat=chat)
+    assert chat.sent == [
+        "最近两个星期还没记下什么",
+        "还没有收进回忆的星期",
+        "好，回头翻一下…",
+        "没有要收的：只有整个星期都过了两个星期，才会收进回忆",
+    ]
+    add_entries(
+        agent_settings.agent_memory_path, [(datetime.now(), "群里", "Epric 发了猫图", False)]
+    )
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!journal", chat=chat)
+    assert "[群里] Epric 发了猫图" in chat.sent[-1]

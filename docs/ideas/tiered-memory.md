@@ -1,4 +1,10 @@
-# Idea: tiered memory (not built)
+# Idea: tiered memory (built 2026-10-29)
+
+Built as described below, with these differences: the core stays at `data/memory.md`
+(next to `data/self.md`), and the days live in `data/memory/days/`, weeks in
+`data/memory/weeks/`. `remember` and `recall` already existed and were extended. The core cap
+stays at the existing 8000 chars for now. Consolidation runs hourly and DMs the owner a short
+note. See the memory section of `docs/personal.md` for how it works now.
 
 Proposed 2026-10-24, merged 2026-10-25 with 小鲸鱼's own idea from the DMs (sort by importance,
 not only by time; start simple). Today she reads the whole `data/memory.md` before every reply,

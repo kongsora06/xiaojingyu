@@ -15,6 +15,7 @@ from .discord_bot import DiscordAgent
 from .group_chat import GroupChat
 from .host_agent import HostAgent
 from .initiative import Initiative
+from .journal import consolidate
 from .logging_setup import configure_logging
 from .observability import MonitorBus
 from .policy import ChannelPolicy
@@ -24,6 +25,23 @@ from .supervisor import RESTART_EXIT_CODE
 from .web import Web
 
 log = logging.getLogger(__name__)
+# How often old weeks are checked for folding into the archive.
+CONSOLIDATE_SECONDS = 3600
+
+
+async def keep_memory(settings: Settings, client, bot) -> None:
+    """Fold weeks older than the recent window into the archive; tell the owner what moved."""
+    await bot.wait_until_ready()
+    while True:
+        try:
+            report = await consolidate(client, settings.agent_model, settings.agent_memory_path)
+        except Exception as error:
+            log.warning("Memory consolidation failed; error_type=%s", type(error).__name__)
+            report = None
+        if report and settings.personal_mode_enabled:
+            lines = "\n".join(f"-# {line}" for line in report.splitlines())
+            await bot.notice_owner("-# 🗂️ 她回头翻了翻两个星期前的事\n" + lines)
+        await asyncio.sleep(CONSOLIDATE_SECONDS)
 
 
 async def run(settings: Settings) -> bool:
@@ -91,7 +109,12 @@ async def run(settings: Settings) -> bool:
                         personal.initiative = initiative
                         initiative.start()
                     await service.record_event("started")
-                    await bot.start(settings.discord_bot_token)
+                    memory_task = asyncio.create_task(keep_memory(settings, client, bot))
+                    try:
+                        await bot.start(settings.discord_bot_token)
+                    finally:
+                        memory_task.cancel()
+                        await asyncio.gather(memory_task, return_exceptions=True)
                     restart = bot.restart_requested
             finally:
                 await service.record_event("stopped")

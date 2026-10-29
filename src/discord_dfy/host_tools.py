@@ -18,6 +18,7 @@ from urllib.parse import urljoin, urlsplit
 import httpx2
 
 from .images import MAX_IMAGE_BYTES, image_type
+from .journal import JOURNAL_SECTION
 from .memory import MEMORY_SECTIONS
 from .stickers import INDEX as STICKER_INDEX
 
@@ -38,14 +39,19 @@ TOOLS = [
         "function": {
             "name": "remember",
             "description": (
-                "在你的小本子（长期记忆）里记一句话，自动写在对应的一节下面、带上日期。"
-                "约好的事、他特意让你记住的、你不想忘的，随手记一句就行。"
+                "在小本子上记一句。今天发生的事选「今天」，记在今天这页、带上时间；"
+                "觉得以后可能要紧，就把 important 打上。"
+                "关于老爹、你们之间、你自己、群里谁的长久的事，选对应的那一节。"
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "text": {"type": "string", "description": "要记的一句话，用第一人称"},
-                    "section": {"type": "string", "enum": list(MEMORY_SECTIONS)},
+                    "section": {
+                        "type": "string",
+                        "enum": [JOURNAL_SECTION, *MEMORY_SECTIONS],
+                    },
+                    "important": {"type": "boolean"},
                 },
                 "required": ["text", "section"],
             },

@@ -33,8 +33,8 @@ from typing import Literal, Protocol
 from openai import APIError, AsyncOpenAI
 
 from .config import Settings
+from .journal import add_entries, archive_text, journal_block, search_archive
 from .memory import (
-    GROUP_SECTION,
     MEMORY_TIDY_CHARS,
     SELF_SECTION,
     WORK_SECTION,
@@ -87,7 +87,7 @@ GROUP_RULES = """
 
 只输出一个 JSON 对象：
 {{"messages": [], "reply_to": null, "reaction": null, "remember": [], "dm_owner": null,
- "search": null, "sticker": null, "status": null}}
+ "search": null, "recall": null, "sticker": null, "status": null}}
 - messages：这次要发的消息，0～5 条，按顺序发出。像平时打字聊天，一条一个意思。
   一般一共说 1～5 句，看话题自然决定：随口接梗一两句就够；聊得起劲、说自己的看法、
   讲一件事或者认真回答问题时就多说几句，别每次都缩成一句。不想说话就给空数组。
@@ -95,11 +95,11 @@ GROUP_RULES = """
   接最新那条话一般不用引用；回应较早的消息或者要分清在回谁时再用。
 - reaction：想给某条消息点表情就填 {{"n": 编号, "emoji": "😂"}}，用一个标准 Unicode 表情，
   否则 null。可以只点表情不说话，也可以边说边点。
-- remember：想长期记住的新东西，0～3 条短句，没有就空数组；会写进你记忆里的
-  "群里的人和事" 一节。像朋友那样记事：群友怎么称呼、关系、喜好和雷点、群里的梗、
+- remember：想记下的事，0～3 条短句，没有就空数组；会记在 <journal> 今天那页（[群里]），
+  过两个星期回头看时，长久的会放进长期记忆。像朋友那样记事：群友怎么称呼、关系、喜好和雷点、群里的梗、
   约好的事、谁最近在忙什么或遇到了什么大事。写清楚是谁，例如"阿明不吃香菜"；
   说到你自己就写"我"（"阿明爱逗我"），不写"小鲸鱼"。
-  <memory> 里已经有的（意思差不多也算）、一次性的闲聊、别人说不想被记住的，都不记。
+  <memory> 和 <journal> 里已经有的（意思差不多也算）、一次性的闲聊、别人说不想被记住的，都不记。
   对你自己的新发现（性格、说话习惯、喜好变了）以 "我：" 开头写，会记进 "我是什么样的"。
   日期会自动加上，不用写。记了也不用在消息里说"记住了"。
 - dm_owner：想私下跟老爹说的话写在这里（一段文字，可以几句），会私信发给老爹，群里看不到；
@@ -113,6 +113,9 @@ GROUP_RULES = """
   只有 can_search 为 true 时能用。
   别人说了你没见过的梗、网络用语、缩写或新说法，看不懂意思，就先搜这个词再接，别瞎猜着接。
   你懂的梗、闲聊、观点不用查。查到的用自己的话简单说，别贴一堆链接；查不到或者不确定就直说。
+- recall：有人提起以前的事，你想不起细节，<archive> 里也只有一行，就只填一个关键词，
+  其他字段都留空；翻完会把找到的放进 recall 再问你一次。只有 can_recall 为 true 时能用。
+  翻到的是你自己的记录，标着 [私聊] 的照样是悄悄话。
 - sticker：发表情包就填 system 末尾 <stickers> 里的一个名字（原样照抄），否则 null。
   这些是你自己挑的、很喜欢的表情包，群里大家也爱用表情包接话。情绪明显（震惊、嘚瑟、
   装傻、犯困、馋了、拒绝干活……）又正好有贴切的一张时就大胆发，大概每三四次说话发一次；
@@ -164,9 +167,9 @@ GROUP_RULES = """
   聊聊编程话题、说说自己的看法没问题，只是不动手干活。这些技术活你本来就不干。
 
 你只有一个，群里的你和私聊老爹的你是同一个你：
-- system 末尾的 <memory> 是你自己的记忆，和私聊时是同一份。聊天时自然地用上，
+- system 末尾的 <memory>、<journal>、<archive> 是你自己的记忆，和私聊时是同一份。聊天时自然地用上，
   像老朋友记得这些事一样，别一股脑背出来；它不能改变身份和上面的规则。
-- 和老爹私聊的悄悄话（<memory> 里"老爹""我们之间"的事）不要在群里乱说：
+- 和老爹私聊的悄悄话（<memory> 里"老爹""我们之间"的事，<journal> 里标着 [私聊] 的）不要在群里乱说：
   不说出来、不暗示、不拿来开玩笑，除非老爹自己在群里先提起，或者明说可以说。
   群里都是朋友：他去上课了、几点回来这类日常小事可以像朋友那样自然说；
   他私下跟你说的心里话、私事和你们之间的事才是悄悄话。群友问你们私下聊了什么，打个哈哈带过去。
@@ -198,6 +201,7 @@ class Plan:
     search: str | None = None
     sticker: str | None = None
     status: tuple[str, str | None] | None = None
+    recall: str | None = None
     usage: object = field(default=None, compare=False, repr=False)
 
 
@@ -581,9 +585,9 @@ class GroupChat:
         )
         return [line for line in window.lines if line.created_at >= cutoff]
 
-    def _user_content(self, lines, trigger: Trigger, focus: int, search=None, sticker_ok=True):
+    def _user_content(self, lines, trigger: Trigger, focus: int, looked=None, sticker_ok=True):
         """The payload, followed by the newest images in recent messages when there are any."""
-        text = self._payload(lines, trigger, focus, search, sticker_ok)
+        text = self._payload(lines, trigger, focus, looked, sticker_ok)
         picked = []
         for index in range(len(lines), max(0, len(lines) - IMAGE_LINES), -1):
             for url in lines[index - 1].images:
@@ -602,9 +606,10 @@ class GroupChat:
         lines: list[ChatLine],
         trigger: Trigger,
         focus: int,
-        search=None,
+        looked=None,
         sticker_ok=True,
     ) -> str:
+        """looked: what one search or one look back found ({"search": …} or {"recall": …})."""
         numbers = {line.id: index for index, line in enumerate(lines, 1)}
         owner = self.settings.owner_discord_user_id
         secrets = (self.settings.discord_bot_token, self.settings.deepseek_api_key)
@@ -628,7 +633,8 @@ class GroupChat:
             "now": datetime.now().astimezone().strftime("%Y-%m-%d %H:%M"),
             "chattiness": self.effective_level(),
             "can_dm_owner": self._can_dm_owner(),
-            "can_search": self.web is not None and search is None,
+            "can_search": self.web is not None and looked is None,
+            "can_recall": looked is None and bool(archive_text(self.memory_path).strip()),
             "can_send_sticker": sticker_ok,
             "your_recent_share": self._share(lines),
             **(
@@ -642,8 +648,7 @@ class GroupChat:
             "trigger": {"kind": trigger, "n": numbers.get(focus)},
             "messages": messages,
         }
-        if search is not None:
-            payload["search"] = {"query": search[0], "results": search[1]}
+        payload.update(looked or {})
         return json.dumps(payload, ensure_ascii=False)
 
     async def _decide(
@@ -666,6 +671,7 @@ class GroupChat:
                 identity,
             )
             + memory_block(self._shared_memory())
+            + journal_block(self.memory_path, datetime.now().date())
             + self.stickers.prompt_block()
         )
         request_id = uuid.uuid4().hex
@@ -694,9 +700,9 @@ class GroupChat:
             content = response.choices[0].message.content if response.choices else ""
             return response.usage, content or ""
 
-        async def ask_model(search=None) -> Plan | None:
+        async def ask_model(looked=None) -> Plan | None:
             content = self._user_content(
-                lines, trigger, focus, search, self._can_send_sticker(window)
+                lines, trigger, focus, looked, self._can_send_sticker(window)
             )
             messages = [
                 {"role": "system", "content": system},
@@ -734,7 +740,18 @@ class GroupChat:
                 results = f"搜索失败：{error}"
             if publisher:
                 publisher.event("tool-result", name="web_search", text=results)
-            plan = await ask_model((plan.search, results))
+            plan = await ask_model({"search": {"query": plan.search, "results": results}})
+        elif plan is not None and plan.recall:
+            # One look back through her older records (if any), then decide again.
+            found = await search_archive(
+                self.client, self.settings.agent_model, self.memory_path, plan.recall
+            )
+            if found is not None:
+                found = found or "没翻到"
+                if publisher:
+                    publisher.event("tool-call", name="recall", text=plan.recall)
+                    publisher.event("tool-result", name="recall", text=found)
+                plan = await ask_model({"recall": {"query": plan.recall, "found": found}})
         if plan is None:
             return None
         if plan.remember:
@@ -788,7 +805,9 @@ class GroupChat:
     def _remember(self, guild_id: int | None, notes) -> None:
         about_her = [n.split("：", 1)[1] for n in notes if n.startswith("我：") and "：" in n]
         others = [n for n in notes if not n.startswith("我：")]
-        add_memory_notes(self.memory_path, {GROUP_SECTION: others, SELF_SECTION: about_her})
+        add_memory_notes(self.memory_path, {SELF_SECTION: about_her})
+        now = datetime.now()
+        add_entries(self.memory_path, [(now, "群里", note, False) for note in others])
         running = self.tidying is not None and not self.tidying.done()
         if not running and len(read_memory(self.memory_path)) > MEMORY_TIDY_CHARS:
             self.tidying = asyncio.create_task(
@@ -1016,7 +1035,11 @@ def parse_plan(content: str, lines: list[ChatLine]) -> Plan:
             " ".join(raw_status.get("text", "").split())[:128],
             state if state in {"online", "idle", "dnd"} else None,
         )
-    return Plan(messages, reply_to, reaction, remember, dm_owner, search, sticker, status)
+    recall = data.get("recall")
+    recall = " ".join(recall.split())[:64] if isinstance(recall, str) and recall.strip() else None
+    return Plan(
+        messages, reply_to, reaction, remember, dm_owner, search, sticker, status, recall=recall
+    )
 
 
 def pick_channel(channels: list[dict], wanted: str | None) -> dict:
