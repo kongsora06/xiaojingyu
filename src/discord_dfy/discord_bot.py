@@ -298,9 +298,12 @@ class DiscordAgent(discord.Client):
             return False
         user = self.get_user(owner) or await self.fetch_user(owner)
         channel = user.dm_channel or await user.create_dm()
-        await DMChat(channel).send(text)
         if self.personal is not None:
+            # Like her replies: one message per paragraph, sticker lines as stickers.
+            await self.personal.deliver(DMChat(channel), text)
             await self.personal.note_outgoing(channel.id, text, source)
+        else:
+            await DMChat(channel).send(text)
         return True
 
     @property

@@ -786,7 +786,7 @@ class HostAgent:
         if reasoning and self.show_reasoning:
             await self._say(chat, reasoning_preview(reasoning))
         if content:
-            await self._deliver(chat, content)
+            await self.deliver(chat, content)
         if not calls:
             if not content:
                 assistant["content"] = "（没有输出）"
@@ -955,7 +955,7 @@ class HostAgent:
         self.viewed.setdefault(channel_id, []).append((path.name, copy.resolve()))
         return "图片会在这一步之后附给你看"
 
-    async def _deliver(self, chat, content) -> None:
+    async def deliver(self, chat, content) -> None:
         """Send a reply the way people text: one message per paragraph, stickers as images."""
         for index, (kind, value) in enumerate(texts(content)):
             if index:

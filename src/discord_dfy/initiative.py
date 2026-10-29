@@ -247,7 +247,7 @@ class Initiative:
             )
         if skipped:
             return None
-        return agent.sanitize(text)[:1800]
+        return agent.sanitize(text)[:4000]
 
     async def _complete(self, system, conversation, publisher=None):
         agent = self.agent
