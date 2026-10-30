@@ -41,7 +41,7 @@ TOOLS = [
             "description": (
                 "在小本子上记一句。今天发生的事选「今天」，记在今天这页、带上时间；"
                 "觉得以后可能要紧，就把 important 打上。"
-                "关于老爹、你们之间、你自己、群里谁的长久的事，选对应的那一节。"
+                "关于主人、你们之间、你自己、群里谁的长久的事，选对应的那一节。"
             ),
             "parameters": {
                 "type": "object",
@@ -63,7 +63,7 @@ TOOLS = [
             "name": "rewrite_self",
             "description": (
                 "重写 <self>：你自己写的“我是个什么样的人”"
-                "（性格、脾气、喜好、说话方式、跟老爹怎么相处、在意的东西）。"
+                "（性格、脾气、喜好、说话方式、跟主人怎么相处、在意的东西）。"
                 "整篇换成新写的，用第一人称，4000 字以内；旧的会自动留底。"
             ),
             "parameters": {
@@ -106,7 +106,7 @@ TOOLS = [
         "function": {
             "name": "recall",
             "description": (
-                "翻你和老爹以前私聊的原话，!new 之前的旧对话也在。"
+                "翻你和主人以前私聊的原话，!new 之前的旧对话也在。"
                 "when 是某一天（2026-10-24）或某个月（2026-10），query 是关键词；至少给一个。"
             ),
             "parameters": {
@@ -184,7 +184,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "send_file",
-            "description": "把房间里的一个文件（图片、你写的东西，最大 10 MB）发给老爹。",
+            "description": "把房间里的一个文件（图片、你写的东西，最大 10 MB）发给主人。",
             "parameters": {
                 "type": "object",
                 "properties": {"path": {"type": "string", "description": "房间里的路径"}},
@@ -218,7 +218,7 @@ WEB_TOOLS = [
         "function": {
             "name": "web_fetch",
             "description": (
-                "打开一个网页，把正文转成 Markdown 返回。看搜索结果的全文或者老爹发来的链接时用。"
+                "打开一个网页，把正文转成 Markdown 返回。看搜索结果的全文或者主人发来的链接时用。"
             ),
             "parameters": {
                 "type": "object",
@@ -234,7 +234,7 @@ VIEW_TOOL = {
     "function": {
         "name": "view_image",
         "description": (
-            "看一张图片（PNG/JPEG/GIF/WebP，最大 8 MB）：房间里的图片，或者老爹以前发给你的图。"
+            "看一张图片（PNG/JPEG/GIF/WebP，最大 8 MB）：房间里的图片，或者主人以前发给你的图。"
             "图片会在这一步之后附给你。"
         ),
         "parameters": {
@@ -252,7 +252,7 @@ PROFILE_TOOL = {
         "description": (
             "改你自己的 Discord 资料。field=status：改状态文字（value，留空就是清掉）和在线状态"
             "（state：online 在线、idle 离开、dnd 请勿打扰），这个可以随时按心情自己改。"
-            "其他 field 只有老爹在私聊里明确同意了才能改，先问他："
+            "其他 field 只有主人在私聊里明确同意了才能改，先问他："
             "avatar / banner（value 是房间里的图片，"
             "可以先用 save_picture 存下来、view_image 看过再换）、"
             "username（全局名字，一小时最多改两次）、about（个人简介 About Me）、"
@@ -279,7 +279,7 @@ GROUP_READ_TOOL = {
         "name": "group_read",
         "description": (
             "看群聊频道最近的聊天记录（最近两小时内，最多 50 条，含你自己在群里说的话）。"
-            "老爹问起群里的事、或者你想知道群里刚才在聊什么时用。"
+            "主人问起群里的事、或者你想知道群里刚才在聊什么时用。"
         ),
         "parameters": {
             "type": "object",
@@ -299,7 +299,7 @@ GROUP_TOOL = {
         "name": "group_post",
         "description": (
             "以你自己的身份在 Discord 群聊频道里发一条消息，群里的人会看到是你说的。"
-            "只在老爹让你去群里说什么、转告什么时用；你自己想去群里说话先问老爹。"
+            "只在主人让你去群里说什么、转告什么时用；你自己想去群里说话先问主人。"
             "用你在群里说话的口吻写。之后群友接你的话，你在群里会接着聊。"
         ),
         "parameters": {

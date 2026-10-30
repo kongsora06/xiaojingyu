@@ -28,7 +28,7 @@ def interaction(*, channel_id=100, guild_id=10, is_bot=False):
         channel_id=channel_id,
         guild=SimpleNamespace(name="测试服"),
         channel=SimpleNamespace(name="闲聊"),
-        user=SimpleNamespace(id=20, bot=is_bot, display_name="老爹"),
+        user=SimpleNamespace(id=20, bot=is_bot, display_name="主人"),
         created_at=datetime.now(UTC),
         response=response,
         followup=followup,
@@ -75,7 +75,7 @@ async def test_ask_goes_through_group_brain(bot):
     stored = bot.service._storage.save_message.await_args.args[0]
     assert stored.source == "ask" and stored.content == "什么是 uv"
     channel_id, line = bot.group.ask.await_args.args
-    assert channel_id == 100 and line.content == "/ask 什么是 uv" and line.author_name == "老爹"
+    assert channel_id == 100 and line.content == "/ask 什么是 uv" and line.author_name == "主人"
     assert bot.group.ask.await_args.kwargs["title"] == ("测试服", "#闲聊")
     sends = event.followup.send.await_args_list
     assert sends[0].args == ("答案",) and len(sends) == 3
@@ -154,27 +154,27 @@ async def test_message_adapter_filters_before_storage_and_group(bot, changes):
 
 
 async def test_group_message_is_stored_and_observed(bot):
-    me = SimpleNamespace(id=BOT, display_name="小鲸鱼")
+    me = SimpleNamespace(id=BOT, display_name="小D")
     event = message(f"<@{BOT}> 看图", mentions=[me])
     await bot.on_message(event)
     stored = bot.service._storage.save_message.await_args.args[0]
     assert isinstance(stored, IncomingMessage) and stored.content == f"<@{BOT}> 看图"
     channel_id, line = bot.group.observe.call_args.args
     kwargs = bot.group.observe.call_args.kwargs
-    assert channel_id == 100 and line.content == "@小鲸鱼 看图" and line.author_name == "阿明"
+    assert channel_id == 100 and line.content == "@小D 看图" and line.author_name == "阿明"
     assert kwargs["mentioned"] and not kwargs["replied_to_bot"]
     assert kwargs["title"] == ("测试服", "#闲聊")
 
 
 async def test_reply_to_bot_is_detected(bot):
     resolved = MagicMock(spec=discord.Message)
-    resolved.author = SimpleNamespace(id=BOT, display_name="小鲸鱼")
+    resolved.author = SimpleNamespace(id=BOT, display_name="小D")
     resolved.content = "我刚说的"
     event = message("真的吗", reference=SimpleNamespace(message_id=77, resolved=resolved))
     await bot.on_message(event)
     line = bot.group.observe.call_args.args[1]
     assert bot.group.observe.call_args.kwargs["replied_to_bot"]
-    assert line.reply_to == 77 and line.reply_preview == "小鲸鱼：我刚说的"
+    assert line.reply_to == 77 and line.reply_preview == "小D：我刚说的"
 
 
 def test_chat_line_describes_media_and_self():
@@ -281,7 +281,7 @@ async def test_reaching_out_is_delivered_like_her_replies(bot, settings):
     channel = SimpleNamespace(id=77, send=AsyncMock())
     bot.get_user = MagicMock(return_value=SimpleNamespace(dm_channel=channel))
     bot.personal = SimpleNamespace(deliver=AsyncMock(), note_outgoing=AsyncMock())
-    text = "老爹，我查到个东西\n\n[表情包：我坐好了]"
+    text = "主人，我查到个东西\n\n[表情包：我坐好了]"
     assert await bot.message_owner(text, source="self")
     chat, sent = bot.personal.deliver.await_args.args
     assert chat.channel is channel and sent == text  # Split into texts and stickers there.

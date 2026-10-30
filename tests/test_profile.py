@@ -69,7 +69,7 @@ async def test_profile_fields(tmp_path):
     (tmp_path / "a.txt").write_text("hi", encoding="utf-8")
     with pytest.raises(ProfileError, match="PNG"):
         await profile.edit("avatar", str(tmp_path / "a.txt"))
-    assert await profile.edit("username", "小鲸鱼") == "名字改成了 小鲸鱼"
+    assert await profile.edit("username", "小D") == "名字改成了 小D"
     with pytest.raises(ProfileError, match="2～32"):
         await profile.edit("username", "x")
     assert await profile.edit("about", "爱吃白米饭的鲸鱼") == "简介（About Me）改好了"
