@@ -56,6 +56,8 @@ class Settings:
     agent_compact_tokens: int = 200000
     agent_memory_path: Path = Path("data/memory.md")
     agent_reflect_seconds: int = 600
+    # A quick first-reaction call before each DM answer.
+    agent_listen: bool = True
     agent_initiative: bool = True
     agent_initiative_per_day: int = 0  # 0 = no daily cap.
     agent_initiative_idle_minutes: int = 30
@@ -184,6 +186,7 @@ class Settings:
             agent_compact_tokens=compact_tokens,
             agent_memory_path=Path(memory_path),
             agent_reflect_seconds=integer("AGENT_REFLECT_SECONDS", 600, 0, 86400),
+            agent_listen=boolean("AGENT_LISTEN", "true"),
             agent_initiative=boolean("AGENT_INITIATIVE", "true"),
             agent_initiative_per_day=integer("AGENT_INITIATIVE_PER_DAY", 0, 0, 100),
             agent_initiative_idle_minutes=integer("AGENT_INITIATIVE_IDLE_MINUTES", 30, 10, 10080),

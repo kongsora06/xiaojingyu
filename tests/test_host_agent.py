@@ -103,6 +103,7 @@ def agent_settings(settings, tmp_path):
         agent_room_dir=tmp_path / "room",
         agent_memory_path=tmp_path / "memory.md",
         agent_reflect_seconds=0,
+        agent_listen=False,
     )
 
 
@@ -980,6 +981,35 @@ async def test_quiet_chat_is_looked_back_over_once(make_agent, agent_settings):
     assert "加班" not in provider.bodies[3]["messages"][1]["content"].split("<chat>")[1]
     await agent._reflect(CHANNEL, await agent.store.load(CHANNEL))
     assert len(provider.bodies) == 4
+
+
+async def test_she_hears_him_out_before_answering(make_agent, store):
+    provider = Provider(
+        completion("在说喜欢我的人多了我会不会更会爱人，他想听我怎么想"),
+        completion("那我大概会被宠坏吧"),
+        500,
+        completion("嗯嗯"),
+    )
+    agent = await make_agent(provider, agent_listen=True)
+    chat = Chat()
+    await say(agent, chat, "被很多人喜欢，你会更有爱一点吗")
+    listen = provider.bodies[0]
+    assert listen["messages"][0]["content"].startswith(host_agent.LISTEN_PROMPT)
+    assert "<self>" in listen["messages"][0]["content"] and "tools" not in listen
+    assert listen["thinking"] == {"type": "disabled"}
+    assert "你会更有爱一点吗" in listen["messages"][1]["content"].split("<new>")[1]
+    user = provider.bodies[1]["messages"][-1]["content"]
+    assert user.startswith("[附注] 你读到他下面这几句，心里先冒出来的念头：在说喜欢我的人")
+    assert user.endswith("被很多人喜欢，你会更有爱一点吗")
+    assert chat.sent == ["那我大概会被宠坏吧"]
+    # The note is not taken for his words when the chat is looked back over.
+    owner, mine = host_agent.split_host_notes(user)
+    assert "念头" not in owner and mine == []
+    # If the first look fails, she answers anyway.
+    await say(agent, chat, "睡了")
+    assert "[附注]" not in provider.bodies[3]["messages"][-1]["content"]
+    assert "【主人】" in provider.bodies[2]["messages"][1]["content"]
+    assert chat.sent[-1] == "嗯嗯"
 
 
 async def test_group_side_dm_rides_along_with_the_owners_next_message(
