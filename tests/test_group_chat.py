@@ -194,7 +194,7 @@ async def settle(group, channel=CHANNEL):
 
 
 async def test_mention_must_be_answered_with_quote_reaction_and_pacing(make_group):
-    first = line("今天吃啥", author=OWNER, name="主人")
+    first = line("今天吃啥", author=OWNER, name="sora")
     second = line("@小D 你说呢", minutes_ago=0)
     provider = Provider(
         plan(["火锅！", "不接受反驳"], reply_to=1, reaction={"n": 2, "emoji": "😂"})
@@ -206,7 +206,7 @@ async def test_mention_must_be_answered_with_quote_reaction_and_pacing(make_grou
     await settle(group)
     assert len(provider.bodies) == 1
     body = provider.bodies[0]
-    assert body["response_format"] == {"type": "json_object"}
+    assert "response_format" not in body
     assert body["thinking"] == {"type": "disabled"} and "reasoning_effort" not in body
     assert "测试服" in body["messages"][0]["content"] and "#闲聊" in body["messages"][0]["content"]
     payload = provider.payload()
@@ -215,6 +215,7 @@ async def test_mention_must_be_answered_with_quote_reaction_and_pacing(make_grou
         ("主人", "owner"),
         ("阿明", "member"),
     ]
+    assert payload["messages"][0]["name"] == "sora" and "name" not in payload["messages"][1]
     assert transport.sent == [
         (CHANNEL, "火锅！", first.id),
         (CHANNEL, "不接受反驳", None),
@@ -225,6 +226,42 @@ async def test_mention_must_be_answered_with_quote_reaction_and_pacing(make_grou
     assert decision["trigger"] == "must" and decision["outcome"] == "spoke"
     assert decision["sent"] == 2 and decision["reaction"] == "😂"
     assert decision["prompt_tokens"] == 50
+
+
+def fish(text):
+    return line(text, author=5, name="肥鱼", is_bot=True)
+
+
+async def test_she_chats_with_other_bots_for_a_few_rounds(make_group):
+    provider = Provider(plan(["你好呀"]), plan(["嗯嗯"]), plan(["主人来啦"]), plan(["又是你"]))
+    transport = Transport()
+    group = make_group(provider, transport, social_bot_rounds=2)
+    # A bot calling her is a look, never a forced answer.
+    assert group.observe(CHANNEL, fish("@小D 我也是AI"), mentioned=True) == "called"
+    await settle(group)
+    assert provider.payload()["messages"][0]["role"] == "bot"
+    assert "role 为 bot 的是群里别的 AI 机器人" in provider.bodies[0]["messages"][0]["content"]
+    assert group.observe(CHANNEL, fish("你好你好")) is not None  # It answered her: round 1.
+    await settle(group)
+    # Round 2 reaches the limit: seen, but no look until a person speaks.
+    assert group.observe(CHANNEL, fish("再聊聊？")) is None
+    await settle(group)
+    assert len(provider.bodies) == 2 and [t for _, t, _ in transport.sent] == ["你好呀", "嗯嗯"]
+    group.observe(CHANNEL, line("我回来了", author=OWNER, name="sora"))
+    await settle(group)
+    assert group.observe(CHANNEL, fish("我也在")) is not None
+    await settle(group)
+    texts = [m["text"] for m in provider.payload()["messages"]]
+    assert "再聊聊？" in texts and texts[-1] == "我也在"
+    assert group_chat.speaker(fish("x")) == "肥鱼（机器人）"
+
+
+async def test_bots_can_be_only_read(make_group):
+    provider = Provider()
+    group = make_group(provider, social_bot_rounds=0)
+    assert group.observe(CHANNEL, fish("@小D 在吗"), mentioned=True) is None
+    await asyncio.sleep(0.05)
+    assert provider.bodies == [] and len(group.windows[CHANNEL].lines) == 1
 
 
 async def test_bot_lines_appear_in_order_as_you(make_group):
@@ -512,7 +549,7 @@ def test_parse_plan_validates_and_maps_numbers():
     assert bad.reply_to is None and bad.reaction is None
     assert parse_plan(json.dumps({"reply_to": True}), lines).reply_to is None
     assert parse_plan("   ", lines) == parse_plan("", lines) == Plan()
-    for broken in ("nope", "[]", '{"messages": 5}'):
+    for broken in ("[]", '{"messages": 5}', '{"messages": ["坏引号”，"后半"]}'):
         with pytest.raises(PlanError):
             parse_plan(broken, lines)
 
@@ -896,7 +933,22 @@ async def test_with_thinking_the_plan_is_plain_json_and_may_be_fenced(make_group
     body = provider.bodies[0]
     assert body["thinking"] == {"type": "enabled"} and "response_format" not in body
     assert [text for _, text, _ in transport.sent] == ["好啊"]
-    assert parse_plan("好的：" + json.dumps(plan(["嗯"])) + " 就这样", []).messages == ("嗯",)
+
+
+def test_her_words_come_first_and_the_json_holds_the_rest():
+    lines = lines_for_plan()
+    rest = json.dumps({"reply_to": 2, "sticker": "得意", "messages": ["填表时重写的一句"]})
+    result = parse_plan("那我这算黑户了？\n\n还得靠主人罩着\n" + rest, lines)
+    # What she wrote first is what gets sent, not the rewrite inside the JSON.
+    assert result.messages == ("那我这算黑户了？", "还得靠主人罩着")
+    assert result.reply_to == lines[1].id and result.sticker == "得意"
+    fenced = parse_plan('这图发得\n```json\n{"reaction": {"n": 1, "emoji": "😂"}}\n```', lines)
+    assert fenced.messages == ("这图发得",) and fenced.reaction == (lines[0].id, "😂")
+    # Words with no JSON after them are still said instead of dropped.
+    assert parse_plan("这图发得，是在暗示什么", lines).messages == ("这图发得，是在暗示什么",)
+    braces = parse_plan('给你画个 {笑脸}\n{"reply_to": null}', lines)
+    assert braces.messages == ("给你画个 {笑脸}",)
+    assert parse_plan('{"reaction": {"n": 1, "emoji": "👍"}}', lines).messages == ()
 
 
 async def test_she_waits_for_someone_who_is_typing(make_group):

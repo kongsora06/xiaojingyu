@@ -143,14 +143,30 @@ def message(content="hello", *, author_id=20, bot_author=False, **fields):
     [
         {"guild": None},
         {"channel": SimpleNamespace(id=101, name="x")},
-        {"author": SimpleNamespace(id=20, bot=True, display_name="b")},
-        {"webhook_id": 5},
+        {"author": SimpleNamespace(id=BOT, bot=True, display_name="小D")},
     ],
 )
 async def test_message_adapter_filters_before_storage_and_group(bot, changes):
     await bot.on_message(message(**changes))
     bot.service._storage.save_message.assert_not_awaited()
     bot.group.observe.assert_not_called()
+
+
+async def test_other_bots_reach_the_group_brain_but_are_never_stored(bot):
+    me = SimpleNamespace(id=BOT, display_name="小D")
+    await bot.on_message(message(f"<@{BOT}> 我是AI", author_id=5, bot_author=True, mentions=[me]))
+    await bot.on_message(message("webhook 转发", webhook_id=9))
+    await bot.on_message(
+        message("别的频道", author_id=5, bot_author=True, channel=SimpleNamespace(id=101, name="x"))
+    )
+    bot.service._storage.save_message.assert_not_awaited()
+    seen = bot.group.observe.call_args_list
+    assert [(c.args[0], c.args[1].content, c.args[1].is_bot) for c in seen] == [
+        (100, "@小D 我是AI", True),
+        (100, "webhook 转发", True),
+    ]
+    assert seen[0].kwargs["mentioned"] and not seen[1].kwargs["mentioned"]
+    assert seen[0].kwargs["title"] == ("测试服", "#闲聊")
 
 
 async def test_group_message_is_stored_and_observed(bot):
@@ -252,7 +268,7 @@ async def test_transport_respects_channel_and_permissions(bot):
         await transport.send(100, "hi", None)
 
 
-async def test_transport_history_skips_other_bots_and_orders_oldest_first(bot):
+async def test_transport_history_marks_other_bots_and_orders_oldest_first(bot):
     now = datetime.now(UTC)
     newest = message("新", id=3, created_at=now)
     mine = message("我说的", id=2, author_id=BOT, bot_author=True, created_at=now)
@@ -262,8 +278,9 @@ async def test_transport_history_skips_other_bots_and_orders_oldest_first(bot):
     channel = text_channel(permissions(), history=[newest, other_bot, mine, hooked, oldest])
     bot.get_channel = MagicMock(return_value=channel)
     lines = await GroupTransport(bot).history(100, 50, now - timedelta(hours=2))
-    assert [line.content for line in lines] == ["旧", "我说的", "新"]
-    assert lines[1].is_self
+    assert [line.content for line in lines] == ["旧", "hook", "我说的", "广告", "新"]
+    assert lines[2].is_self and not lines[2].is_bot
+    assert [line.is_bot for line in lines] == [False, True, False, True, False]
     assert channel.history_kwargs["limit"] == 50 and channel.history_kwargs["oldest_first"] is False
     await GroupTransport(bot).react(100, 7, "👍")
     channel.get_partial_message.return_value.add_reaction.assert_awaited_once_with("👍")

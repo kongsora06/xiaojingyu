@@ -61,6 +61,7 @@ def chat_line(message: discord.Message, bot_id: int | None) -> ChatLine:
     preview = None
     if isinstance(resolved, discord.Message):
         preview = f"{display_name(resolved.author)}：{(resolved.content or '')[:80]}"
+    is_self = bot_id is not None and message.author.id == bot_id
     return ChatLine(
         id=message.id,
         author_id=message.author.id,
@@ -69,7 +70,8 @@ def chat_line(message: discord.Message, bot_id: int | None) -> ChatLine:
         created_at=message.created_at,
         reply_to=getattr(reference, "message_id", None),
         reply_preview=preview,
-        is_self=bot_id is not None and message.author.id == bot_id,
+        is_self=is_self,
+        is_bot=not is_self and (message.author.bot or message.webhook_id is not None),
     )
 
 
@@ -195,9 +197,7 @@ class GroupTransport:
         bot_id = self.bot.user.id if self.bot.user is not None else None
         lines = []
         async for message in channel.history(limit=limit, after=after, oldest_first=False):
-            # Other bots and webhooks stay out of the conversation, as they do live.
-            if (message.author.bot and message.author.id != bot_id) or message.webhook_id:
-                continue
+            # Other bots and webhooks are read too (marked is_bot), as they are live.
             lines.append(await read_line(message, bot_id))
         return lines[::-1]
 
@@ -488,6 +488,27 @@ class DiscordAgent(discord.Client):
         reference = getattr(message, "reference", None)
         resolved = getattr(reference, "resolved", None)
         resolved_author = getattr(resolved, "author", None)
+        mentions = getattr(message, "mentions", None) or []
+        mentioned = any(user.id == self.user.id for user in mentions) or bool(
+            re.search(rf"<@!?{self.user.id}>", message.content)
+        )
+        if message.author.bot or message.webhook_id:
+            # Other bots go to the group brain (which limits the rounds) but are never
+            # stored; her own lines come via note_self.
+            if (
+                self.group is not None
+                and message.author.id != self.user.id
+                and message.channel.id in self.settings.allowed_channel_ids
+            ):
+                self.group.observe(
+                    message.channel.id,
+                    await read_line(message, self.user.id),
+                    mentioned=mentioned,
+                    replied_to_bot=getattr(resolved_author, "id", None) == self.user.id,
+                    title=self._title(message),
+                    guild_id=message.guild.id,
+                )
+            return
         incoming = IncomingMessage(
             id=message.id,
             guild_id=message.guild.id,
@@ -502,10 +523,6 @@ class DiscordAgent(discord.Client):
         )
         if not await self.service.record_message(incoming) or self.group is None:
             return
-        mentions = getattr(message, "mentions", None) or []
-        mentioned = any(user.id == self.user.id for user in mentions) or bool(
-            re.search(rf"<@!?{self.user.id}>", message.content)
-        )
         self.group.observe(
             message.channel.id,
             await read_line(message, self.user.id),

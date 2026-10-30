@@ -41,6 +41,8 @@ class Settings:
     social_reasoning_effort: str = "low"
     social_history_messages: int = 50
     social_history_minutes: int = 120
+    # Rounds she may go back and forth with another bot before a person speaks (0 = none).
+    social_bot_rounds: int = 5
     social_state_path: Path = Path("data/group_state.json")
     social_sticker_dir: Path = Path("data/stickers")
     personal_mode_enabled: bool = False
@@ -170,6 +172,7 @@ class Settings:
             social_reasoning_effort=effort,
             social_history_messages=integer("SOCIAL_HISTORY_MESSAGES", 50, 5, 200),
             social_history_minutes=integer("SOCIAL_HISTORY_MINUTES", 120, 5, 1440),
+            social_bot_rounds=integer("SOCIAL_BOT_ROUNDS", 5, 0, 50),
             social_state_path=Path(state_path),
             social_sticker_dir=Path(
                 env.get("SOCIAL_STICKER_DIR", "data/stickers").strip() or "data/stickers"
