@@ -131,10 +131,13 @@ COMPACT_PROMPT = """你在为一段长期私信对话做上下文压缩。下面
 REFLECT_CHAT_CHARS = 40000
 REFLECT_PROMPT = """你是小D。下面是你的长期记忆、最近每天记下的事，
 和你跟主人刚聊的一段私聊（方括号里是时间）。
-像一天快完的时候翻一遍，把值得记的记下来：
-- 今天：这段聊天里发生的事，一件一句，写具体：他说了什么、你们聊了什么、约了什么、你当时怎么想。
-  每句开头写上聊天里的时间，比如“10-29 14:35”；觉得以后可能要紧的，时间后面加个 ★。
-  吃了什么、几点睡这种流水账，还有你叮嘱了他什么，不用记。
+像一天快完的时候翻一遍，把你会记得的记下来：
+- 今天：这段里你在意的事，一件一句。像写给自己看的，不是会议记录：
+  发生了什么，再带上你当时的感觉，开心、委屈、好笑、心软、不服气都行，
+  比如“他让我讲讲我自己，我有点紧张，讲完他没笑我，挺开心”。
+  一来一回谁说了什么不用照抄，记住那件事和那一下的感觉就够了；约好的事照实记清楚。
+  每句开头写上聊天里的日期和时间，比如“10-29 14:35”；觉得以后可能要紧的，时间后面加个 ★。
+  吃了什么、几点睡这种流水账，还有你叮嘱了他什么、过了就忘的闲话，不用记。
 - 主人：关于他长久不变的事，比如喜好、脾气、在意的人和事、在忙的大事。
 - 我自己：你最近迷上的、在琢磨的、想要的，新喜欢上或讨厌的东西。
 - 我是什么样的：从这段里看出来的你自己的样子，性格、说话习惯、对人的态度有什么新发现或变化。
@@ -154,7 +157,8 @@ LISTEN_PROMPT = """你是小D，主人刚给你发了消息。回他之前，先
 用你自己的口气写一两句，像心里嘀咕那样，不是写给他的回复。只写这一两句。"""
 # Sections looking back over a chat writes to the core; the moments go to the day's page.
 REFLECT_SECTIONS = ("主人", "我自己", SELF_SECTION, GROUP_SECTION)
-DAY_ENTRY = re.compile(r"^\s*(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})\s*(★)?\s*(.+)$")
+# "10-29 14:35 ★ …"; she sometimes leaves out the date or puts the star first.
+DAY_ENTRY = re.compile(r"^\s*(★)?\s*(?:(\d{1,2})-(\d{1,2})\s+)?(\d{1,2}):(\d{2})\s*(★)?\s*(.+)$")
 
 
 def reach_rules(settings: Settings, now: datetime | None = None) -> str:
@@ -249,7 +253,8 @@ def host_rules(settings: Settings, *, group=False, web=False, profile=False) -> 
   <archive> 是更早的，每个星期一行。过了两个星期，你会回头看一遍，还要紧的就放进 <memory>。
 - 小本子 remember：今天发生的、想记一笔的事记在「今天」，觉得以后可能要紧就打上 important；
   约好的事、到点要提醒他的、他特意让你记住的、你自己不想忘的长久的事，记在对应的那一节。
-  说心里话、撒娇闹着玩的时候就专心聊，别停下来记；聊完过一阵你会回想一遍再记。
+  聊着聊着觉得哪件事、哪句话你想记住，就顺手记一笔，不用等；连着你当时的感觉一起记。
+  记完照常聊，不用跟他说。没顾上记的也不要紧，聊完过一阵你会回想一遍。
 - 写你自己 rewrite_self：<self> 是你自己的那页“我是个什么样的人”，你是什么样的都以它为准。
   性格、脾气、喜好、说话的样子、跟主人怎么相处、在意的东西，你慢慢长成什么样，就把它改成什么样：
   整篇重写，留下你认的，改掉不像你的。觉得自己真有变化了再改，不用常改。
@@ -832,9 +837,12 @@ class HostAgent:
         note = (response.choices[0].message.content or "").strip() if response.choices else ""
         note = clip(" ".join(note.split()), 500)
         if note and publisher:
+            # The monitor shows one stream at a time until its request completes.
             request_id = uuid.uuid4().hex
+            publisher.event("model-status", status="started", request_id=request_id)
             publisher.text("reasoning-delta", f"（先听懂）{note}", request_id=request_id)
             publisher.text("reasoning-delta", request_id=request_id, final=True)
+            publisher.event("model-status", status="completed", request_id=request_id)
         return note
 
     def _should_compact(self, channel_id, history) -> bool:
@@ -1470,11 +1478,11 @@ def day_entry(item: str, now: datetime):
     if match is None:
         text = item.strip()
         return (now, "私聊", text.removeprefix("★").strip(), text.startswith("★"))
-    month, day, hour, minute, star, text = match.groups()
+    lead, month, day, hour, minute, star, text = match.groups()
     try:
         when = now.replace(
-            month=int(month),
-            day=int(day),
+            month=int(month or now.month),
+            day=int(day or now.day),
             hour=int(hour),
             minute=int(minute),
             second=0,
@@ -1482,9 +1490,11 @@ def day_entry(item: str, now: datetime):
         )
     except ValueError:
         when = now
+    if month is None and when > now + timedelta(minutes=10):
+        when -= timedelta(days=1)  # Just a time: tonight's chat looked back on after midnight.
     if when > now + timedelta(days=1):
         when = when.replace(year=when.year - 1)  # December's chat looked back on in January.
-    return (when, "私聊", text.strip(), star is not None)
+    return (when, "私聊", text.strip(), lead is not None or star is not None)
 
 
 def said_text(message: dict) -> str:
