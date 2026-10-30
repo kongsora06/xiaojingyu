@@ -1,4 +1,5 @@
 import asyncio
+import io
 import json
 import time
 from contextlib import nullcontext
@@ -32,6 +33,7 @@ from discord_dfy.host_agent import (
 from discord_dfy.host_tools import Room, ToolError, describe_call, download_image
 from discord_dfy.initiative import SELF_TAG, Initiative, ago, in_peak, in_quiet_hours
 from discord_dfy.journal import add_entries, day_path, journal_dir
+from discord_dfy.monitor import Renderer
 from discord_dfy.monitor_protocol import Publisher
 from discord_dfy.portrait import STARTING_SELF
 from discord_dfy.service import AgentService
@@ -599,6 +601,29 @@ async def test_monitor_streams_thinking_text_and_tools(make_agent):
     assert {"tool-call", "tool-result", "task-status", "model-status"} <= kinds
     assert all(e["source"] == "personal" and e["session_id"] == str(CHANNEL) for e in events)
     assert agent.usage[CHANNEL]["cached"] == 16
+
+
+async def test_monitor_shows_her_first_reaction_and_moves_on(make_agent):
+    responses = [
+        httpx2.Response(200, json=completion("这么晚还来找我")),
+        sse_response(chunk({"content": "在呢"})),
+    ]
+
+    async def provider(request):
+        return responses.pop(0)
+
+    agent = await make_agent(provider, agent_listen=True)
+    agent.observer = Observer()
+    await say(agent, Chat(), "还没睡")
+    out = io.StringIO()
+    renderer = Renderer(out, no_color=True, clock=lambda: 1e12)
+    for event in agent.observer.sink.events:
+        renderer.event(event)
+        renderer.refresh(force=True)
+    # Nothing left open: an unfinished stream would hold back everything after it.
+    assert not renderer.streams and not renderer.pending
+    shown = out.getvalue()
+    assert shown.index("（先听懂）这么晚还来找我") < shown.index("在呢")
 
 
 async def test_think_toggle_folds_reasoning_into_dm(make_agent):
@@ -1692,6 +1717,15 @@ def test_looked_back_moments_keep_their_time():
         2026, 12, 31, 23
     )
     assert host_agent.day_entry("★ 没写时间", now) == (now, "私聊", "没写时间", True)
+    # Only a time (the date left out): today, or last night when that time is still ahead.
+    assert host_agent.day_entry("08:02 ★ 他让我讲讲我自己", now) == (
+        datetime(2026, 10, 30, 8, 2),
+        "私聊",
+        "他让我讲讲我自己",
+        True,
+    )
+    assert host_agent.day_entry("23:40 他说晚安", now)[0] == datetime(2026, 10, 29, 23, 40)
+    assert host_agent.day_entry("★ 10-29 20:14 他说别等太久", now)[3] is True
 
 
 async def test_recall_looks_in_the_archive_and_the_days_page(make_agent, agent_settings):
