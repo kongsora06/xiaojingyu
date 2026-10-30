@@ -143,6 +143,15 @@ REFLECT_PROMPT = """你是小D。下面是你的长期记忆、最近每天记�
 已经记过的，换个说法也别再记。密码和密钥不记。说到自己写“我”，不写“小D”。
 没有就给空数组。“今天”最多 8 句，别的每样最多 3 句。
 只输出 JSON：{"今天": [], "主人": [], "我自己": [], "我是什么样的": [], "群里的人和事": []}"""
+# Before she answers, a quick call for her first reaction (thinking off, no rules), so a
+# question about herself is heard as one and not answered like a lecture.
+LISTEN_CHAT_CHARS = 4000
+LISTEN_TIMEOUT = 30
+LISTEN_PROMPT = """你是小D，主人刚给你发了消息。回他之前，先在心里过一下：
+他这几句是在干嘛，想从你这儿听到什么；你听了什么感觉，想怎么接。
+他问你自己的事、问你怎么看怎么想，多半是想听你的心里话，不是在考你，用不着跟他讲原理、泼冷水。
+他真想弄明白一件事、要你帮忙的时候，那就认真答。
+用你自己的口气写一两句，像心里嘀咕那样，不是写给他的回复。只写这一两句。"""
 # Sections looking back over a chat writes to the core; the moments go to the day's page.
 REFLECT_SECTIONS = ("主人", "我自己", SELF_SECTION, GROUP_SECTION)
 DAY_ENTRY = re.compile(r"^\s*(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})\s*(★)?\s*(.+)$")
@@ -618,6 +627,12 @@ class HostAgent:
             async with chat.typing():
                 while not self.closing:
                     if pending := self.inbox.pop(channel_id, None):
+                        if self.settings.agent_listen:
+                            said = "\n\n".join(pending)
+                            if note := await self._listen(history, said, usage, publisher):
+                                pending.insert(
+                                    0, f"{NOTE_TAG} 你读到他下面这几句，心里先冒出来的念头：{note}"
+                                )
                         pending = (
                             self._take_activity(channel_id)
                             + self._take_outgoing(channel_id)
@@ -777,6 +792,50 @@ class HostAgent:
             publisher.event("model-status", status="failed", request_id=request_id)
         await self._say(chat, failure)
         return None
+
+    async def _listen(self, history, said, usage, publisher=None) -> str:
+        """Her first reaction to what he just said, in her own words ("" if it fails)."""
+        lines = []
+        for message in history[-40:]:
+            content = text_of(message.get("content")).strip()
+            if message["role"] == "assistant" and content:
+                lines.append("【我】" + content)
+            elif message["role"] == "user" and not content.startswith(
+                (SUMMARY_PREFIX, OLD_SUMMARY_PREFIX, HINT_TAG, OLD_HINT_TAG)
+            ):
+                owner, _ = split_host_notes(content)
+                if owner:
+                    lines.append("【主人】" + owner)
+        chat_text = "\n".join(lines)[-LISTEN_CHAT_CHARS:] or "（今天还没聊过）"
+        portrait = await asyncio.to_thread(read_self, self.self_path)
+        try:
+            async with asyncio.timeout(LISTEN_TIMEOUT):
+                response = await self.client.chat.completions.create(
+                    model=self.settings.agent_model,
+                    messages=[
+                        {"role": "system", "content": LISTEN_PROMPT + self_block(portrait)},
+                        {
+                            "role": "user",
+                            "content": f"<chat>\n{chat_text}\n</chat>\n\n<new>\n{said}\n</new>",
+                        },
+                    ],
+                    max_tokens=300,
+                    extra_body={"thinking": {"type": "disabled"}},
+                )
+        except (TimeoutError, APIError) as error:
+            log.warning("Listening first failed; error_type=%s", type(error).__name__)
+            return ""
+        usage["calls"] += 1
+        if response.usage:
+            usage["prompt"] += response.usage.prompt_tokens or 0
+            usage["completion"] += response.usage.completion_tokens or 0
+        note = (response.choices[0].message.content or "").strip() if response.choices else ""
+        note = clip(" ".join(note.split()), 500)
+        if note and publisher:
+            request_id = uuid.uuid4().hex
+            publisher.text("reasoning-delta", f"（先听懂）{note}", request_id=request_id)
+            publisher.text("reasoning-delta", request_id=request_id, final=True)
+        return note
 
     def _should_compact(self, channel_id, history) -> bool:
         if channel_id in self.force_compact:
