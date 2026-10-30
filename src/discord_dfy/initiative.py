@@ -40,11 +40,11 @@ IDLE_STEPS = 15
 # Her last reply when she does not want to message him.
 SKIP = "（不找他）"
 SKIP_MARK = re.compile(r"[（(]\s*不找他\s*[)）]")
-NUDGE = """[提示] 这不是老爹发的消息。现在是 {now}（周{weekday}），
-老爹上次跟你说话是 {ago} 前，这会儿他不在。{pending}{group}
+NUDGE = """[提示] 这不是主人发的消息。现在是 {now}（周{weekday}），
+主人上次跟你说话是 {ago} 前，这会儿他不在。{pending}{group}
 这会儿是你自己的时间，想干嘛干嘛：写日记，在房间里写点东西，上网逛逛，收张图，
 看看 <self> 那页还像不像现在的你。不想动就发会儿呆。（send_file 这会儿用不了。）
-然后看你想不想找老爹。翻到好玩的、想起什么、群里有事、想要个东西、闲得慌、想他了，
+然后看你想不想找主人。翻到好玩的、想起什么、群里有事、想要个东西、闲得慌、想他了，
 都能发，想发几次发几次，又是鲸鱼也没关系。
 他在上课、上班、写作业，你照样能发，他有空自己会看；他说过喜欢你来找他。
 只是别催他回你。他去睡了就让他睡，有话等他醒了再说。
@@ -243,7 +243,7 @@ class Initiative:
             publisher.event(
                 "task-status",
                 status="completed",
-                text="这次不找老爹" if skipped else "发给老爹了",
+                text="这次不找主人" if skipped else "发给主人了",
             )
         if skipped:
             return None

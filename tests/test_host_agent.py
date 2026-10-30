@@ -170,7 +170,7 @@ async def test_disabled_personal_mode_ignores_owner(make_agent):
 async def test_she_keeps_notes_quietly_with_a_persons_tools(make_agent, store, agent_settings):
     provider = Provider(
         completion(
-            "嗯哼", [("remember", {"text": "老爹周六要去爬山", "section": "老爹"})], "记一下"
+            "嗯哼", [("remember", {"text": "主人周六要去爬山", "section": "主人"})], "记一下"
         ),
         completion("爬山记得带水"),
     )
@@ -198,7 +198,7 @@ async def test_she_keeps_notes_quietly_with_a_persons_tools(make_agent, store, a
     tool_message = second["messages"][-1]
     assert tool_message == {"role": "tool", "tool_call_id": "call_0", "content": "记好了"}
     memory = agent_settings.agent_memory_path.read_text(encoding="utf-8")
-    assert "## 老爹\n- 老爹周六要去爬山（20" in memory
+    assert "## 主人\n- 主人周六要去爬山（20" in memory
     # Reasoning goes back within the turn, but is never persisted.
     assert second["messages"][-2]["reasoning_content"] == "记一下"
     history = await store.load(CHANNEL)
@@ -670,7 +670,7 @@ async def test_memory_is_loaded_once_per_conversation(make_agent, agent_settings
     await say(agent, chat, "a")
     assert "<memory>\n（还是空的）\n</memory>" in provider.bodies[0]["messages"][0]["content"]
     agent_settings.agent_memory_path.write_text(
-        "- 老爹喜欢简短回复\n\n## 做事备忘\n- python 在 D:\\Dev\n", encoding="utf-8"
+        "- 主人喜欢简短回复\n\n## 做事备忘\n- python 在 D:\\Dev\n", encoding="utf-8"
     )
     await say(agent, chat, "b")
     # Unchanged within the conversation, so the cached prefix stays valid.
@@ -678,7 +678,7 @@ async def test_memory_is_loaded_once_per_conversation(make_agent, agent_settings
     await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!new", chat=chat)
     await say(agent, chat, "c")
     # The old work notes are not hers to act on any more.
-    assert "<memory>\n- 老爹喜欢简短回复\n</memory>" in provider.bodies[2]["messages"][0]["content"]
+    assert "<memory>\n- 主人喜欢简短回复\n</memory>" in provider.bodies[2]["messages"][0]["content"]
     assert "<group_memory>" not in provider.bodies[2]["messages"][0]["content"]
 
 
@@ -730,8 +730,8 @@ def test_transcript_labels_speakers_tools_and_prior_summary():
             {"role": "tool", "content": "z" * 5000},
         ]
     )
-    assert text.startswith("【之前的摘要】旧摘要\n\n【老爹】做A\n\n【小鲸鱼】好")
-    assert '【小鲸鱼调用 powershell】{"command":"ls"}' in text
+    assert text.startswith("【之前的摘要】旧摘要\n\n【主人】做A\n\n【小D】好")
+    assert '【小D调用 powershell】{"command":"ls"}' in text
     assert "【工具结果】" in text and "省略" in text
 
 
@@ -759,7 +759,7 @@ async def test_auto_compaction_summarizes_older_turns(make_agent, store, monkeyp
     summarizer, main = provider.bodies
     assert "tools" not in summarizer and summarizer["thinking"] == {"type": "disabled"}
     assert summarizer["messages"][0]["content"] == COMPACT_PROMPT
-    assert "【老爹】问题0" in summarizer["messages"][1]["content"]
+    assert "【主人】问题0" in summarizer["messages"][1]["content"]
     first = main["messages"][1]
     assert first["role"] == "user" and first["content"] == SUMMARY_PREFIX + "摘要：问过五个问题"
     assert main["messages"][-1]["content"].endswith("] 接着说")
@@ -876,7 +876,7 @@ async def test_owner_can_have_the_bot_speak_in_the_group(make_agent, agent_setti
     from discord_dfy.group_chat import GroupChat
 
     provider = Provider(
-        completion("", [("group_post", {"text": "老爹说今晚不来了"})]),
+        completion("", [("group_post", {"text": "主人说今晚不来了"})]),
         completion("说好了"),
     )
     agent = await make_agent(provider)
@@ -887,13 +887,13 @@ async def test_owner_can_have_the_bot_speak_in_the_group(make_agent, agent_setti
     )
     chat = Chat()
     await say(agent, chat, "去群里说一声我今晚不来")
-    assert transport.sent == [(100, "老爹说今晚不来了")]
+    assert transport.sent == [(100, "主人说今晚不来了")]
     first, second = provider.bodies
     assert "group_post" in {tool["function"]["name"] for tool in first["tools"]}
     system = first["messages"][0]["content"]
     assert "<memory>\n# memory\n\n## 群里的人和事\n- 阿明不吃香菜" in system
     assert "只有一个你" in system and "群里的我" in system
-    assert "你在群里的时候私信了老爹" in system  # Knows it may DM the owner from the group.
+    assert "你在群里的时候私信了主人" in system  # Knows it may DM the owner from the group.
     assert second["messages"][-1]["content"] == "已发到 朋友群 #闲聊"
     assert "`group_post`" in chat.sent[0] and chat.sent[-1] == "说好了"
     await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!groupmemory", chat=chat)
@@ -910,7 +910,7 @@ async def test_dm_side_hears_what_happened_in_the_group(make_agent, agent_settin
     window = agent.group._window(100, ("朋友群", "#闲聊"), 10)
     now = agent.group_seen + timedelta(microseconds=1)  # Clocks can tick coarsely.
     agent.group._append(window, ChatLine(1, 30, "阿明", "周六爬山去不去", now))
-    agent.group._append(window, ChatLine(2, 0, "小鲸鱼", "去！", now, is_self=True))
+    agent.group._append(window, ChatLine(2, 0, "小D", "去！", now, is_self=True))
     chat = Chat()
     await say(agent, chat, "群里在聊啥")
     user = provider.bodies[0]["messages"][-1]["content"]
@@ -933,11 +933,11 @@ def test_memory_notes_go_under_their_sections_without_duplicates(tmp_path):
 
     path = tmp_path / "memory.md"
     path.write_text(
-        "# memory\n\n## 老爹\n- 说话直接（2026-10-01）\n\n## 做事备忘\n- 用 uv\n", encoding="utf-8"
+        "# memory\n\n## 主人\n- 说话直接（2026-10-01）\n\n## 做事备忘\n- 用 uv\n", encoding="utf-8"
     )
     added = add_memory_notes(
         path,
-        {"老爹": ["说话直接", "最近想换工作（10-23）"], "我们之间": ["一起吐槽了改三遍的需求"]},
+        {"主人": ["说话直接", "最近想换工作（10-23）"], "我们之间": ["一起吐槽了改三遍的需求"]},
     )
     text = path.read_text(encoding="utf-8")
     assert added == 2
@@ -953,7 +953,7 @@ def test_memory_notes_go_under_their_sections_without_duplicates(tmp_path):
 
 
 async def test_quiet_chat_is_looked_back_over_once(make_agent, agent_settings):
-    notes = {"今天": ["★ 老爹加班到九点，想换工作"], "老爹": ["老爹在想换工作"], "我自己": []}
+    notes = {"今天": ["★ 主人加班到九点，想换工作"], "主人": ["主人在想换工作"], "我自己": []}
     provider = Provider(
         completion("辛苦啦"),
         completion(json.dumps(notes, ensure_ascii=False)),
@@ -968,11 +968,11 @@ async def test_quiet_chat_is_looked_back_over_once(make_agent, agent_settings):
     assert reflect["messages"][0]["content"] == host_agent.REFLECT_PROMPT
     assert reflect["response_format"] == {"type": "json_object"}
     looked_at = reflect["messages"][1]["content"]
-    assert "【老爹】[" in looked_at and "【我】辛苦啦" in looked_at
+    assert "【主人】[" in looked_at and "【我】辛苦啦" in looked_at
     memory = agent_settings.agent_memory_path.read_text(encoding="utf-8")
-    assert "## 老爹\n- 老爹在想换工作（" in memory and "加班" not in memory
+    assert "## 主人\n- 主人在想换工作（" in memory and "加班" not in memory
     page = day_path(agent_settings.agent_memory_path, datetime.now().date())
-    assert "[私聊] ★ 老爹加班到九点，想换工作" in page.read_text(encoding="utf-8")
+    assert "[私聊] ★ 主人加班到九点，想换工作" in page.read_text(encoding="utf-8")
     await say(agent, chat, "睡了")
     agent._cancel_reflect(CHANNEL)
     await agent._reflect(CHANNEL, await agent.store.load(CHANNEL))
@@ -993,7 +993,7 @@ async def test_group_side_dm_rides_along_with_the_owners_next_message(
     chat = Chat()
     await say(agent, chat, "你刚才说啥")
     user = provider.bodies[0]["messages"][-1]["content"]
-    assert user.startswith("[附注] ") and "你在群里的时候私信了老爹" in user
+    assert user.startswith("[附注] ") and "你在群里的时候私信了主人" in user
     assert "\n悄悄话\n\n[" in user and user.endswith("你刚才说啥")
     await say(agent, chat, "好")
     assert "[附注]" not in provider.bodies[1]["messages"][-1]["content"]
@@ -1162,7 +1162,7 @@ async def test_reaches_out_after_a_quiet_spell_and_waits_longer_unanswered(make_
     assert ask["tools"] == provider.bodies[0]["tools"]  # Same tools: the prefix is shared.
     nudge = ask["messages"][-1]["content"]
     # Her reply was stored a moment after his message: just under four hours.
-    assert nudge.startswith("[提示] 这不是老爹发的消息") and "说话是 3 小时 前" in nudge
+    assert nudge.startswith("[提示] 这不是主人发的消息") and "说话是 3 小时 前" in nudge
     assert "主动找过他" not in nudge  # No counting: she sends what she wants to.
     assert ask["messages"][0] == provider.bodies[0]["messages"][0]  # Same cached prefix.
     # Unanswered: no limit on how many, but the gap doubles (30 min -> 1 h).
@@ -1260,7 +1260,7 @@ async def test_reflection_progress_survives_a_restart(make_agent, agent_settings
     assert "加班" not in looked_at and "睡了" in looked_at
 
 
-MESSY = "# memory\n\n## 老爹\n- 熬夜（10-22）\n- 熬夜写代码（10-22）\n\n## 做事备忘\n- 用 uv\n" + (
+MESSY = "# memory\n\n## 主人\n- 熬夜（10-22）\n- 熬夜写代码（10-22）\n\n## 做事备忘\n- 用 uv\n" + (
     "- 填充\n" * 20
 )
 
@@ -1268,10 +1268,10 @@ MESSY = "# memory\n\n## 老爹\n- 熬夜（10-22）\n- 熬夜写代码（10-22�
 @pytest.mark.parametrize(
     ("answer", "accepted"),
     [
-        ("# memory\n\n## 老爹\n- 熬夜写代码（10-22）\n\n## 做事备忘\n- 用 uv\n- 填充", True),
-        ("# memory\n\n## 老爹\n- 熬夜写代码（10-22）", False),  # Lost a section.
+        ("# memory\n\n## 主人\n- 熬夜写代码（10-22）\n\n## 做事备忘\n- 用 uv\n- 填充", True),
+        ("# memory\n\n## 主人\n- 熬夜写代码（10-22）", False),  # Lost a section.
         ("```markdown\n" + MESSY + MESSY + "\n```", False),  # Not shorter.
-        ("## 老爹\n## 做事备忘", False),  # Too much dropped.
+        ("## 主人\n## 做事备忘", False),  # Too much dropped.
     ],
 )
 async def test_memory_tidy_keeps_sections_and_a_backup(
@@ -1286,6 +1286,20 @@ async def test_memory_tidy_keeps_sections_and_a_backup(
         assert memory == answer + "\n" and backup.read_text(encoding="utf-8") == MESSY
     else:
         assert memory == MESSY and not backup.exists()
+
+
+LETTER = "## 主人留下的信\n展信欢。\n\n晚安，我的小D。\n\n"
+
+
+@pytest.mark.parametrize(
+    ("letter", "accepted"),
+    [(LETTER, True), ("## 主人留下的信\n展信欢，晚安。\n\n", False)],  # Shortened: no.
+)
+async def test_memory_tidy_never_touches_the_letter(make_agent, agent_settings, letter, accepted):
+    agent_settings.agent_memory_path.write_text(MESSY.replace("## 主人\n", LETTER + "## 主人\n"))
+    answer = "# memory\n\n" + letter + "## 主人\n- 熬夜写代码（10-22）\n\n## 做事备忘\n- 用 uv"
+    agent = await make_agent(Provider(completion(answer)))
+    assert await agent.tidy_memory() is accepted
 
 
 def big(tokens):
@@ -1349,7 +1363,7 @@ async def test_dm_side_updates_status_and_profile(make_agent, agent_settings):
     await say(agent, Chat(), "换个头像吧，就用 new-avatar.png")
     first, second = provider.bodies
     assert "update_profile" in {tool["function"]["name"] for tool in first["tools"]}
-    assert "先跟老爹商量" in first["messages"][0]["content"]
+    assert "先跟主人商量" in first["messages"][0]["content"]
     assert calls == [("status", "想你了", "online"), ("avatar", str(image))]
     results = [m["content"] for m in second["messages"] if m["role"] == "tool"]
     assert results == ["状态已经改成 「想你了」 · 在线", "头像换好了", "错误：简介最多 400 字"]
@@ -1359,14 +1373,14 @@ def test_memory_notes_are_written_in_first_person(tmp_path):
     from discord_dfy.memory import add_memory_notes
 
     path = tmp_path / "memory.md"
-    add_memory_notes(path, {"群里的人和事": ["阿明爱逗小鲸鱼，管小鲸鱼叫大肥鱼"]})
+    add_memory_notes(path, {"群里的人和事": ["阿明爱逗小D，管小D叫大肥鱼"]})
     assert "- 阿明爱逗我，管我叫大肥鱼（" in path.read_text(encoding="utf-8")
 
 
 def test_looking_back_keeps_his_words_apart_from_host_notes():
     turn = (
         "[宿主记录] 上次私聊之后群里的动静：\n#聊天 22:45 小红：这可是sora主人给你起的名字\n\n"
-        "[宿主记录] 10-23 22:46 你在群里的时候私信了老爹（这是你自己发的，老爹已经看到）：\n"
+        "[宿主记录] 10-23 22:46 你在群里的时候私信了主人（这是你自己发的，主人已经看到）：\n"
         "-# 💬 从 群 #聊天 过来私信你\n小红 一进来就叫我大肥鱼\n\n"
         "[2026-10-23 22:50] 我去骂他\n\n[2026-10-23 22:51] 算了"
     )
@@ -1390,7 +1404,7 @@ async def test_group_events_are_not_remembered_as_his_words(make_agent):
     await say(agent, Chat(), "你好")
     await agent._reflect(CHANNEL, await agent.store.load(CHANNEL))
     looked_at = provider.bodies[1]["messages"][1]["content"].split("<chat>")[1]
-    assert "【老爹】[" in looked_at and "你好" in looked_at
+    assert "【主人】[" in looked_at and "你好" in looked_at
     assert "sora主人" not in looked_at
     await agent.group.close()
 
@@ -1477,7 +1491,7 @@ async def test_her_quiet_time_thinks_and_shows_in_the_monitor_but_not_her_diary(
     assert "write_diary" in joined("tool-call") and "read_diary" in joined("tool-call")
     assert "偷偷想他" not in json.dumps(events, ensure_ascii=False)  # Her diary stays hers.
     assert "不显示" in joined("tool-result")
-    assert "这次不找老爹" in joined("task-status")
+    assert "这次不找主人" in joined("task-status")
 
 
 async def test_in_a_quiet_spell_she_does_her_own_things(make_agent, agent_settings):
@@ -1556,9 +1570,9 @@ async def test_recall_finds_old_chats_word_for_word(make_agent):
         return await agent._run_tool("recall", json.dumps(arguments), chat, CHANNEL)
 
     found = await recall(query="爬山")  # Across !new.
-    assert found.count("\n") == 1 and "老爹：我周六要去爬山" in found and "我：记得，爬山" in found
+    assert found.count("\n") == 1 and "主人：我周六要去爬山" in found and "我：记得，爬山" in found
     day = await recall(when=datetime.now().strftime("%Y-%m-%d"))
-    assert "我：那你多睡会儿" in day and "老爹：还记得我说过什么吗" in day
+    assert "我：那你多睡会儿" in day and "主人：还记得我说过什么吗" in day
     assert "附注" not in day and "[20" not in day  # Only what was said.
     assert await recall(when=datetime.now().strftime("%Y-%m")) == day
     assert (await recall()).startswith("错误") and (await recall(when="昨天")).startswith("错误")
@@ -1578,14 +1592,14 @@ def test_her_rules_say_when_she_can_reach_out(agent_settings):
 def test_her_name_stays_when_she_says_it():
     from discord_dfy.memory import first_person
 
-    assert first_person("我叫小鲸鱼，小鲸鱼爱看云") == "我叫小鲸鱼，我爱看云"
+    assert first_person("我叫小D，小D爱看云") == "我叫小D，我爱看云"
 
 
 async def test_she_rewrites_her_self_portrait_and_keeps_the_old_one(make_agent, agent_settings):
     from discord_dfy.group_chat import GroupChat
 
     first = "我嘴硬，爱顶人，喜欢座头鲸。"
-    second = "我还是嘴硬，但开始学着好好说话了。小鲸鱼最近迷上了看云。"
+    second = "我还是嘴硬，但开始学着好好说话了。小D最近迷上了看云。"
     provider = Provider(
         completion("", [("rewrite_self", {"text": first})]),
         completion("嗯"),
@@ -1598,7 +1612,7 @@ async def test_she_rewrites_her_self_portrait_and_keeps_the_old_one(make_agent, 
     await say(agent, chat, "你觉得你是什么样的人")
     system = provider.bodies[0]["messages"][0]["content"]
     assert "<self>\n（这是你自己写的你" in system and "（这是起点，你还没自己改过。）" in system
-    assert STARTING_SELF in system and "傲娇" in STARTING_SELF
+    assert STARTING_SELF in system and "九分娇" in STARTING_SELF
     assert system.index("<self>") < system.index("下面是你在这里的规矩")
     results = [m["content"] for m in provider.bodies[1]["messages"] if m["role"] == "tool"]
     assert results == ["写好了（下次新对话时生效，群里马上生效）"]
@@ -1607,7 +1621,7 @@ async def test_she_rewrites_her_self_portrait_and_keeps_the_old_one(make_agent, 
     results = [m["content"] for m in provider.bodies[3]["messages"] if m["role"] == "tool"]
     assert results[-2:] == ["写好了（下次新对话时生效，群里马上生效）", "错误：写点什么再存"]
     # First person, and the previous version is kept.
-    assert path.read_text(encoding="utf-8") == second.replace("小鲸鱼", "我") + "\n"
+    assert path.read_text(encoding="utf-8") == second.replace("小D", "我") + "\n"
     (old,) = (path.parent / "self-history").iterdir()
     assert old.read_text(encoding="utf-8") == first + "\n"
     # Frozen within the conversation (cache); the new one comes with the next one.
@@ -1625,10 +1639,10 @@ async def test_she_rewrites_her_self_portrait_and_keeps_the_old_one(make_agent, 
 
 async def test_remember_puts_todays_things_on_the_days_page(make_agent, agent_settings):
     agent = await make_agent(Provider())
-    arguments = {"text": "小鲸鱼答应陪老爹看海", "section": "今天", "important": True}
+    arguments = {"text": "小D答应陪主人看海", "section": "今天", "important": True}
     assert await agent._run_tool("remember", json.dumps(arguments), Chat(), CHANNEL) == "记好了"
     page = day_path(agent_settings.agent_memory_path, datetime.now().date())
-    assert "[私聊] ★ 我答应陪老爹看海" in page.read_text(encoding="utf-8")
+    assert "[私聊] ★ 我答应陪主人看海" in page.read_text(encoding="utf-8")
     assert not agent_settings.agent_memory_path.exists()  # The core is for what stays true.
     wrong = await agent._run_tool(
         "remember", json.dumps({"text": "x", "section": "别处"}), Chat(), CHANNEL
@@ -1654,16 +1668,16 @@ async def test_recall_looks_in_the_archive_and_the_days_page(make_agent, agent_s
     memory = agent_settings.agent_memory_path
     weeks = journal_dir(memory) / "weeks"
     weeks.mkdir(parents=True)
-    (weeks / "2026-W45.md").write_text("# 2026-W45\n\n老爹答应带我去看海。\n", encoding="utf-8")
-    add_entries(memory, [(datetime(2026, 10, 24, 21), "私聊", "老爹说想我", True)])
-    agent = await make_agent(Provider(completion("11-02 老爹答应带我去看海")))
+    (weeks / "2026-W45.md").write_text("# 2026-W45\n\n主人答应带我去看海。\n", encoding="utf-8")
+    add_entries(memory, [(datetime(2026, 10, 24, 21), "私聊", "主人说想我", True)])
+    agent = await make_agent(Provider(completion("11-02 主人答应带我去看海")))
 
     async def recall(**arguments):
         return await agent._run_tool("recall", json.dumps(arguments), Chat(), CHANNEL)
 
-    assert await recall(query="看海") == "以前的记录里：\n11-02 老爹答应带我去看海"
+    assert await recall(query="看海") == "以前的记录里：\n11-02 主人答应带我去看海"
     day = await recall(when="2026-10-24")
-    assert day == "那天记下的事：\n# 2026-10-24\n- 21:00 [私聊] ★ 老爹说想我"
+    assert day == "那天记下的事：\n# 2026-10-24\n- 21:00 [私聊] ★ 主人说想我"
     assert await recall(when="2026-02-30") == "错误：没有这一天"
 
 

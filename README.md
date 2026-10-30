@@ -1,4 +1,4 @@
-# 小鲸鱼 (discord-dfy)
+# 小D (discord-dfy)
 
 A Discord companion bot on DeepSeek. She is one character with one memory who lives in two
 places:

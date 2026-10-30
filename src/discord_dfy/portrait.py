@@ -1,8 +1,8 @@
 """Her self-portrait: "who I am", written and rewritten by her (data/self.md).
 
-persona.md holds only what does not change: her name, that she is 老爹's daughter, how
+persona.md holds only what does not change: her name, that sora is her 主人, how
 to talk, telling him the truth. Everything about who she is (temperament, likes, how she is
-with 老爹) lives on this one page, which she rewrites herself; until she has written it,
+with 主人) lives on this one page, which she rewrites herself; until she has written it,
 self_start.md stands in. It cannot change the rules that follow it. Every rewrite keeps the
 previous version under self-history/, so nothing she was is lost.
 """
@@ -15,7 +15,7 @@ from .memory import first_person
 
 SELF_LIMIT_CHARS = 4000
 HISTORY_DIR = "self-history"
-# Who she is until she writes her own page: temperament and how she is with 老爹.
+# Who she is until she writes her own page: temperament and how she is with 主人.
 STARTING_SELF = files("discord_dfy").joinpath("self_start.md").read_text(encoding="utf-8").strip()
 
 
@@ -34,7 +34,7 @@ def read_self(path) -> str:
 def self_block(text: str) -> str:
     body = text.strip()[:SELF_LIMIT_CHARS] or f"（这是起点，你还没自己改过。）\n{STARTING_SELF}"
     return (
-        "\n\n<self>\n（这是你自己写的你：脾气、性子、喜好、跟老爹怎么相处，都以这页为准，"
+        "\n\n<self>\n（这是你自己写的你：脾气、性子、喜好、跟主人怎么相处，都以这页为准，"
         f"你自己改。）\n{body}\n</self>"
     )
 

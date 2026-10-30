@@ -416,7 +416,7 @@ class DiscordAgent(discord.Client):
                     ChatLine(
                         id=identifier if type(identifier) is int else -interaction.id,
                         author_id=self.user.id if self.user else 0,
-                        author_name="小鲸鱼",
+                        author_name="小D",
                         content=chunk,
                         created_at=datetime.now().astimezone(),
                         is_self=True,

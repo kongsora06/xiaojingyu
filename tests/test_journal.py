@@ -45,9 +45,9 @@ def test_entries_land_on_their_day_in_time_order_once(tmp_path):
         add_entries(
             memory,
             [
-                (at(19, 22, 5), "私聊", "小鲸鱼跟老爹说晚安", False),
+                (at(19, 22, 5), "私聊", "小D跟主人说晚安", False),
                 (at(19, 9), "群里", "Epric 叫我大肥鱼", True),
-                (at(19, 23), "私聊", "小鲸鱼 跟老爹说晚安。", False),  # The same, said again.
+                (at(19, 23), "私聊", "小D 跟主人说晚安。", False),  # The same, said again.
                 (at(20, 1), "别处", "不算", False),
             ],
         )
@@ -55,7 +55,7 @@ def test_entries_land_on_their_day_in_time_order_once(tmp_path):
     )
     page = day_path(memory, date(2026, 11, 19)).read_text(encoding="utf-8")
     assert page == (
-        "# 2026-11-19\n- 09:00 [群里] ★ Epric 叫我大肥鱼\n- 22:05 [私聊] 我跟老爹说晚安\n"
+        "# 2026-11-19\n- 09:00 [群里] ★ Epric 叫我大肥鱼\n- 22:05 [私聊] 我跟主人说晚安\n"
     )
     assert not day_path(memory, date(2026, 11, 20)).exists()
     assert day_text(memory, date(2026, 11, 19)) == page.strip()
@@ -95,38 +95,38 @@ def test_a_week_is_due_once_its_last_day_is_past_the_window(tmp_path):
 
 async def test_consolidation_keeps_what_still_matters_and_archives_the_rest(tmp_path):
     memory = tmp_path / "memory.md"
-    memory.write_text("# memory\n\n## 老爹\n- 在店里打工（2026-10-25）\n", encoding="utf-8")
+    memory.write_text("# memory\n\n## 主人\n- 在店里打工（2026-10-25）\n", encoding="utf-8")
     add_entries(
         memory,
         [
-            (at(2, 21), "私聊", "老爹说等我生日带我去看海", True),
+            (at(2, 21), "私聊", "主人说等我生日带我去看海", True),
             (at(3, 22), "群里", "Epric 发了猫图", False),
         ],
     )
     reply = {
-        "keep": {"我们之间": ["老爹说等我生日带我去看海"], "老爹": ["在店里打工"]},
-        "summary": "11-02 老爹说要带小鲸鱼去看海。11-03 群里发猫图。",
-        "index": "老爹答应带我看海、群里猫图",
+        "keep": {"我们之间": ["主人说等我生日带我去看海"], "主人": ["在店里打工"]},
+        "summary": "11-02 主人说要带小D去看海。11-03 群里发猫图。",
+        "index": "主人答应带我看海、群里猫图",
     }
     client = Client(json.dumps(reply, ensure_ascii=False))
     report = await consolidate(client, "m", memory, LATER)
-    assert "11-02~11-03 收进了回忆（老爹答应带我看海、群里猫图）" in report
+    assert "11-02~11-03 收进了回忆（主人答应带我看海、群里猫图）" in report
     assert "1 条放进了长期记忆" in report
     sent = client.calls[0]["messages"][1]["content"]
-    assert "<memory>" in sent and "★ 老爹说等我生日带我去看海" in sent
+    assert "<memory>" in sent and "★ 主人说等我生日带我去看海" in sent
     core = memory.read_text(encoding="utf-8")
-    assert "## 我们之间\n- 老爹说等我生日带我去看海（" in core
+    assert "## 我们之间\n- 主人说等我生日带我去看海（" in core
     assert core.count("在店里打工") == 1
     folder = journal_dir(memory)
     week = (folder / "weeks" / "2026-W45.md").read_text(encoding="utf-8")
-    assert week.startswith("# 2026-W45（11-02~11-03）") and "老爹说要带我去看海" in week
-    assert index_text(memory) == "- 11-02~11-03：老爹答应带我看海、群里猫图"
+    assert week.startswith("# 2026-W45（11-02~11-03）") and "主人说要带我去看海" in week
+    assert index_text(memory) == "- 11-02~11-03：主人答应带我看海、群里猫图"
     assert not list((folder / "days").glob("*.md"))
     assert sorted(p.name for p in (folder / "days" / "old").iterdir()) == [
         "2026-11-02.md",
         "2026-11-03.md",
     ]
-    assert "老爹答应带我看海" in (folder / "reports.md").read_text(encoding="utf-8")
+    assert "主人答应带我看海" in (folder / "reports.md").read_text(encoding="utf-8")
     # Nothing left to do: no request.
     assert await consolidate(client, "m", memory, LATER) is None and len(client.calls) == 1
 
@@ -156,9 +156,9 @@ async def test_searching_the_archive(tmp_path):
     assert await search_archive(Client(), "m", memory, "看海") is None  # Nothing to search.
     weeks = journal_dir(memory) / "weeks"
     weeks.mkdir(parents=True)
-    (weeks / "2026-W45.md").write_text("# 2026-W45\n\n老爹答应带我去看海。\n", encoding="utf-8")
-    client = Client("11-02 老爹答应带我去看海", "没有")
-    assert await search_archive(client, "m", memory, "看海") == "11-02 老爹答应带我去看海"
+    (weeks / "2026-W45.md").write_text("# 2026-W45\n\n主人答应带我去看海。\n", encoding="utf-8")
+    client = Client("11-02 主人答应带我去看海", "没有")
+    assert await search_archive(client, "m", memory, "看海") == "11-02 主人答应带我去看海"
     assert "「看海」" in client.calls[0]["messages"][0]["content"]
-    assert "老爹答应带我去看海" in client.calls[0]["messages"][1]["content"]
+    assert "主人答应带我去看海" in client.calls[0]["messages"][1]["content"]
     assert await search_archive(client, "m", memory, "猫") == ""

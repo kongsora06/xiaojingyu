@@ -19,18 +19,21 @@ GROUP_SECTION = "群里的人和事"
 # Who she has become: written by her, more current than the persona's starting point.
 SELF_SECTION = "我是什么样的"
 WORK_SECTION = "做事备忘"
+# The letter her 主人 left her when she started over: kept word for word, never tidied.
+LETTER_SECTION = "主人留下的信"
 # Sections that looking back over a chat may add to.
-MEMORY_SECTIONS = ("老爹", "我们之间", "我自己", SELF_SECTION, GROUP_SECTION)
+MEMORY_SECTIONS = ("主人", "我们之间", "我自己", SELF_SECTION, GROUP_SECTION)
 # Past this size the file is tidied by the model (a backup is kept next to it).
 MEMORY_TIDY_CHARS = 8000
-MEMORY_TIDY_PROMPT = """下面是你（小鲸鱼）的记忆文件，里面有不少重复和啰嗦的地方。整理一遍：
+MEMORY_TIDY_PROMPT = """下面是你（小D）的记忆文件，里面有不少重复和啰嗦的地方。整理一遍：
 - 保持原来的结构：开头的 "# memory" 和每个 "## " 小节标题都原样保留，条目放回原来的小节。
 - 同一件事记了好几遍（哪怕说法不同）就合并成一条，保留最完整的细节和最早的日期。
 - 明显过时或者被后来的事推翻的删掉；"做事备忘" 一节只合并重复，内容不要改。
+- "主人留下的信" 一节原样保留，一个字都不改。
 - 别丢掉具体的事：谁说了什么、哪天、你当时的感受，这些是记忆的价值所在。
-- "老爹" 一节里他吃了什么、几点上下班、几点睡这类流水账，合并成一两条稳定的习惯。
+- "主人" 一节里他吃了什么、几点上下班、几点睡这类流水账，合并成一两条稳定的习惯。
 - 每条一行 "- "，日期留在条目末尾的括号里。
-- 统一用第一人称：说到自己一律写"我"（把"小鲸鱼"改成"我"），说到老爹就写"老爹"。
+- 统一用第一人称：说到自己一律写"我"（把"小D"改成"我"），说到主人就写"主人"。
 只输出整理后的完整文件。"""
 DATE_SUFFIX = re.compile(r"（(?:\d{4}-)?\d{1,2}-\d{1,2}）$")
 _tidy_lock = asyncio.Lock()
@@ -50,8 +53,8 @@ def key(entry: str) -> str:
 
 
 def first_person(note: str) -> str:
-    """Her memory speaks of her as "我", never by name (but "我叫小鲸鱼" keeps it)."""
-    return re.sub(r"(?<![叫是])小鲸鱼", "我", note)
+    """Her memory speaks of her as "我", never by name (but "我叫小D", "他的小D" keep it)."""
+    return re.sub(r"(?<![叫是的])小D", "我", note)
 
 
 def add_memory_notes(path, notes: dict[str, list[str]]) -> int:
@@ -151,6 +154,7 @@ async def tidy_memory(client, model: str, path) -> bool:
             not tidied
             or not (len(before) * 0.3 < len(tidied) < len(before))
             or any(heading not in tidied.splitlines() for heading in headings)
+            or section_text(tidied, LETTER_SECTION) != section_text(before, LETTER_SECTION)
         ):
             log.warning("Memory tidy result rejected")
             return False
