@@ -8,7 +8,7 @@ import aiosqlite
 import discord
 from openai import AsyncOpenAI
 
-from .ai import BASE_URL
+from .ai import BASE_URL, error_kind
 from .config import ConfigurationError, Settings
 from .conversation_store import ConversationStore
 from .discord_bot import DiscordAgent
@@ -21,6 +21,7 @@ from .observability import MonitorBus
 from .policy import ChannelPolicy
 from .service import AgentService
 from .storage import Storage
+from .stream_watch import StreamWatch
 from .supervisor import RESTART_EXIT_CODE
 from .web import Web
 
@@ -36,7 +37,7 @@ async def keep_memory(settings: Settings, client, bot) -> None:
         try:
             report = await consolidate(client, settings.agent_model, settings.agent_memory_path)
         except Exception as error:
-            log.warning("Memory consolidation failed; error_type=%s", type(error).__name__)
+            log.warning("Memory consolidation failed; error_type=%s", error_kind(error))
             report = None
         if report and settings.personal_mode_enabled:
             lines = "\n".join(f"-# {line}" for line in report.splitlines())
@@ -86,6 +87,13 @@ async def run(settings: Settings) -> bool:
                     )
                     bot.group = group
                     group.profile = bot.profile
+                    if settings.watch_stream:
+                        stream = StreamWatch(settings, client, storage=storage)
+                        stream.on_look = group.observe_stream
+                        stream.active = lambda: group.controls.enabled
+                        group.stream = stream
+                        group.voice = bot
+                        bot.stream = stream
                     if settings.personal_mode_enabled:
                         personal_store = ConversationStore(settings.personal_database_path)
                         await personal_store.open()
@@ -101,6 +109,8 @@ async def run(settings: Settings) -> bool:
                         )
                         bot.personal = personal
                         personal.profile = bot.profile
+                        if settings.watch_stream:
+                            personal.voice = bot
                         # Never double-text: a DM to the owner waits while one is unanswered.
                         group.owner_waiting = lambda: any(personal.outgoing.values())
                         initiative = Initiative(

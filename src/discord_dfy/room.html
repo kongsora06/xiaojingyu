@@ -1,0 +1,625 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>她的房间</title>
+<style>
+:root {
+  --page: #e9edf0; --ink: #24303a; --muted: #5c6a75; --line: #c9d2d9; --card: #f7f4ee;
+  --wall: #dbe3e8; --wall-stripe: rgba(255, 255, 255, .28);
+  --wood: #8a6a4f; --wood-dark: #6a4f3a; --wood-light: #a98564; --floor: #b48f6c;
+  --amber: #f2b35a; --amber-deep: #c9822b; --sea: #6f8fa8; --deep: #34506a;
+  --gone: #a2574a; --paper: #fbf8f1;
+  --hand: "LXGW WenKai", "霞鹜文楷", "Kaiti SC", "STKaiti", "KaiTi", "楷体", serif;
+  --ui: "Microsoft YaHei UI", "PingFang SC", "Noto Sans SC", system-ui, sans-serif;
+  --sky-top: #8ec3e6; --sky-bottom: #d9eef7; --dim: 0; --stars: 0; --lamp: 0;
+  --lx: 15%; --ly: 80%;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --page: #11171d; --ink: #dfe6eb; --muted: #94a2ad; --line: #2b3741; --card: #1b232b; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--ink); font: 15px/1.6 var(--ui); }
+button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+button:focus-visible, a:focus-visible { outline: 2px solid var(--amber-deep); outline-offset: 2px; }
+
+header { max-width: 1280px; margin: 0 auto; padding: 22px 20px 14px; display: flex;
+  flex-wrap: wrap; gap: 10px 28px; align-items: end; }
+h1 { margin: 0; font: 600 30px/1.2 var(--hand); letter-spacing: .04em; }
+.sub { color: var(--muted); font-size: 13px; margin-top: 2px; }
+nav { display: flex; gap: 4px; margin-left: auto; }
+nav button { padding: 6px 14px; border-radius: 999px; color: var(--muted); }
+nav button[aria-selected="true"] { background: var(--card); color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--line); }
+.nowchip { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center;
+  font-size: 14px; color: var(--muted); min-height: 24px; }
+.nowchip b { color: var(--ink); font-weight: 600; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: #5aa87a; flex: none; }
+.dot.idle { background: var(--amber); } .dot.dnd { background: #c9584c; }
+.dot.busy { animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 50% { box-shadow: 0 0 0 6px rgba(90, 168, 122, .25); } }
+.status { font-family: var(--hand); font-size: 16px; color: var(--ink); }
+
+main { max-width: 1280px; margin: 0 auto; padding: 0 20px 48px; }
+[hidden] { display: none !important; }
+
+/* ---------- the room ---------- */
+.room { position: relative; border-radius: 14px; overflow: hidden; padding: 34px 34px 58px;
+  color: #24303a;
+  background: repeating-linear-gradient(90deg, var(--wall-stripe) 0 2px, transparent 2px 46px), var(--wall);
+  display: grid; gap: 30px 34px; grid-template-columns: 300px minmax(0, 1fr) minmax(300px, 400px);
+  grid-template-areas: "window wall shelf" "desk case shelf"; align-items: end; }
+.room::before { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 112px;
+  background: linear-gradient(#5d4634 0 7px, transparent 7px),
+    repeating-linear-gradient(90deg, rgba(0, 0, 0, .09) 0 2px, transparent 2px 120px), var(--floor); }
+.room::after { content: ""; position: absolute; inset: 0; pointer-events: none; z-index: 5;
+  background:
+    radial-gradient(circle at var(--lx) var(--ly), rgba(255, 190, 100, calc(var(--lamp) * .22)) 0, transparent 300px),
+    radial-gradient(circle at var(--lx) var(--ly), rgba(8, 14, 28, calc(var(--dim) * (1 - var(--lamp) * .85))) 0,
+      rgba(8, 14, 28, var(--dim)) 420px); }
+.room > * { position: relative; z-index: 1; }
+.label { font: 13px var(--ui); color: #5c6a75; letter-spacing: .08em; margin: 0 0 10px; }
+
+.window { grid-area: window; align-self: start; }
+.pane { position: relative; height: 250px; border: 12px solid #f3efe6; border-radius: 120px 120px 6px 6px;
+  overflow: hidden; background: linear-gradient(var(--sky-top), var(--sky-bottom));
+  box-shadow: 0 6px 16px rgba(30, 40, 50, .22), inset 0 0 0 2px rgba(0, 0, 0, .08); }
+.pane::before, .pane::after { content: ""; position: absolute; background: #f3efe6; z-index: 3; }
+.pane::before { left: 50%; top: 0; bottom: 0; width: 8px; margin-left: -4px; }
+.pane::after { top: 58%; left: 0; right: 0; height: 8px; }
+.stars { position: absolute; inset: 0; opacity: var(--stars);
+  background: radial-gradient(1.4px 1.4px at 18% 22%, #fff 99%, transparent),
+    radial-gradient(1.2px 1.2px at 34% 12%, #fff 99%, transparent), radial-gradient(1.6px 1.6px at 62% 26%, #fff 99%, transparent),
+    radial-gradient(1.2px 1.2px at 78% 14%, #fff 99%, transparent), radial-gradient(1.3px 1.3px at 48% 38%, #fff 99%, transparent),
+    radial-gradient(1.1px 1.1px at 86% 40%, #fff 99%, transparent), radial-gradient(1.2px 1.2px at 12% 46%, #fff 99%, transparent); }
+.orb { position: absolute; width: 34px; height: 34px; border-radius: 50%; margin: -17px; z-index: 1; }
+.orb.sun { background: #fff3c4; box-shadow: 0 0 28px 10px rgba(255, 236, 170, .7); }
+.orb.moon { background: #f4f1e4; box-shadow: 0 0 18px 4px rgba(240, 240, 255, .45); }
+.seaband { position: absolute; left: 0; right: 0; bottom: 0; height: 26%; z-index: 2;
+  background: linear-gradient(rgba(255, 255, 255, .28), transparent 30%), linear-gradient(#5f86a6, #2f4f6c);
+  filter: brightness(calc(1 - var(--dim) * 1.4)); }
+.sill { height: 12px; margin: 0 -10px; background: #f3efe6; border-radius: 3px;
+  box-shadow: 0 4px 8px rgba(30, 40, 50, .22); }
+
+.desk { grid-area: desk; }
+.calendar { width: 190px; background: var(--paper); padding: 10px 12px 12px; border-radius: 3px;
+  box-shadow: 0 3px 8px rgba(30, 40, 50, .2); margin: 0 0 26px 8px; transform: rotate(-1.2deg); position: relative; }
+.calendar::before { content: ""; position: absolute; left: 50%; top: -5px; width: 10px; height: 10px;
+  margin-left: -5px; border-radius: 50%; background: #b5654a; box-shadow: 0 2px 2px rgba(0, 0, 0, .3); }
+.calendar h3 { margin: 0 0 8px; font: 15px var(--hand); }
+.days { display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; }
+.day { aspect-ratio: 1; border-radius: 50%; background: #e4e0d6; }
+.day.n1 { background: #a9c0d0; } .day.n2 { background: #6f8fa8; } .day.n3 { background: #34506a; }
+.day.today { box-shadow: 0 0 0 2px var(--amber-deep); }
+.calendar small { display: block; margin-top: 8px; color: #5c6a75; font-size: 12px; }
+.desktop { display: flex; align-items: flex-end; gap: 14px; padding: 0 10px; }
+.table { height: 14px; background: var(--wood-light); border-radius: 3px; position: relative;
+  box-shadow: 0 5px 8px rgba(30, 40, 50, .25); }
+.table::before, .table::after { content: ""; position: absolute; top: 14px; width: 12px; height: 78px;
+  background: var(--wood); }
+.table::before { left: 14px; } .table::after { right: 14px; }
+.desk { padding-bottom: 78px; }
+.diary { width: 88px; height: 116px; border-radius: 3px 7px 7px 3px; position: relative; text-align: center;
+  background: linear-gradient(90deg, rgba(0, 0, 0, .28) 0 7px, transparent 7px), var(--deep); color: #f3dba8;
+  font: 20px var(--hand); padding-top: 26px; box-shadow: 3px 0 0 #e9e2d0, 4px 2px 6px rgba(0, 0, 0, .3);
+  transform: rotate(-3deg); transform-origin: bottom left; }
+.diary::after { content: ""; position: absolute; right: -4px; top: 50%; width: 26px; height: 14px; margin-top: -7px;
+  background: #8c6a3c; border-radius: 3px; box-shadow: inset -7px 0 0 #d8b56a; }
+.diary.writing { animation: breathe 1.8s ease-in-out infinite; }
+@keyframes breathe { 50% { box-shadow: 3px 0 0 #e9e2d0, 0 0 22px 6px rgba(242, 179, 90, .7); } }
+.diarynote { font-size: 13px; color: #3d4a55; padding-bottom: 10px; line-height: 1.5; white-space: nowrap; }
+.diarynote b { font: 17px var(--hand); display: block; color: #24303a; }
+.lamp { width: 54px; height: 108px; position: relative; flex: none;
+  background: linear-gradient(#4a4038, #4a4038) bottom center / 32px 6px no-repeat; }
+.lamp::before { content: ""; position: absolute; left: 6px; top: 0; width: 42px; height: 30px;
+  background: #3f5568; clip-path: polygon(22% 0, 78% 0, 100% 100%, 0 100%); }
+.lamp::after { content: ""; position: absolute; left: 25px; top: 30px; width: 4px; height: 74px; background: #4a4038; }
+.lamp i { position: absolute; left: 14px; top: 28px; width: 26px; height: 9px; border-radius: 0 0 13px 13px;
+  background: #efe9da; opacity: .5; }
+.lit .lamp i { background: #ffdf9a; opacity: 1; box-shadow: 0 6px 26px 12px rgba(255, 205, 120, .75); }
+
+.wall { grid-area: wall; align-self: start; }
+.hung { display: flex; flex-wrap: wrap; gap: 26px 28px; align-items: flex-start; }
+.frame { width: 152px; text-align: center; }
+.frame .glass { display: block; width: 100%; aspect-ratio: 4 / 3; border: 9px solid var(--wood); border-radius: 2px;
+  box-shadow: 0 5px 10px rgba(30, 40, 50, .28), inset 0 0 0 5px #f1ece0; overflow: hidden;
+  background: linear-gradient(120deg, rgba(255, 255, 255, .35), transparent 40%),
+    repeating-linear-gradient(100deg, #c9d0d5 0 9px, #bcc4ca 9px 18px); }
+.frame img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.plate { display: inline-block; margin-top: 8px; padding: 1px 10px; font: 13px var(--hand); color: #4a3b22;
+  background: linear-gradient(#e6cf96, #cfae66); border-radius: 2px; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pin { width: 124px; min-height: 96px; padding: 20px 12px 12px; background: var(--paper); position: relative;
+  box-shadow: 0 3px 7px rgba(30, 40, 50, .22); font: 17px/1.35 var(--hand); text-align: left; overflow-wrap: anywhere; }
+.pin::before { content: ""; position: absolute; left: 50%; top: 6px; width: 10px; height: 10px; margin-left: -5px;
+  border-radius: 50%; background: var(--sea); box-shadow: 0 2px 2px rgba(0, 0, 0, .3); }
+.pin small { display: block; margin-top: 6px; font: 12px var(--ui); color: #5c6a75; }
+.hung > :nth-child(odd) { transform: rotate(-1.4deg); } .hung > :nth-child(3n) { transform: rotate(1.6deg); }
+
+.case { grid-area: case; }
+.cabinet { border: 12px solid var(--wood); border-bottom-width: 40px; border-radius: 6px 6px 3px 3px; position: relative;
+  background: linear-gradient(115deg, rgba(255, 255, 255, .5) 0 8%, transparent 8% 16%, rgba(255, 255, 255, .28) 16% 19%, transparent 19%),
+    linear-gradient(#f4f0e6, #e7e1d2); min-height: 190px; padding: 22px 20px 20px;
+  box-shadow: 0 8px 14px rgba(30, 40, 50, .3), inset 0 0 0 2px rgba(0, 0, 0, .12); }
+.cabinet::after { content: "橱窗 · 她摆出来给你看的"; position: absolute; left: 0; right: 0; bottom: -32px; text-align: center;
+  font: 14px var(--hand); color: #f1e3c3; letter-spacing: .12em; }
+.shown { display: flex; flex-wrap: wrap; gap: 22px 20px; align-items: flex-end; }
+.exhibit { width: 132px; text-align: left; position: relative; transition: transform .15s; }
+.exhibit:hover { transform: translateY(-3px); }
+.sheet { display: block; background: #fffdf8; min-height: 150px; padding: 16px 12px 12px; font: 18px/1.4 var(--hand);
+  box-shadow: 0 4px 9px rgba(30, 40, 50, .25); overflow-wrap: anywhere;
+  background-image: repeating-linear-gradient(transparent 0 25px, rgba(111, 143, 168, .16) 25px 26px); }
+.exhibit img { display: block; width: 100%; aspect-ratio: 1; object-fit: cover; border: 6px solid #fffdf8;
+  box-shadow: 0 4px 9px rgba(30, 40, 50, .25); }
+.tag { display: block; margin-top: 8px; padding: 5px 8px; background: #fbe7b6; font: 14px/1.4 var(--hand);
+  color: #4a3b22; transform: rotate(-1deg); box-shadow: 0 2px 4px rgba(30, 40, 50, .18); overflow-wrap: anywhere; }
+.fresh-mark { position: absolute; right: -8px; top: -9px; background: #b5654a; color: #fff; font-size: 12px;
+  width: 24px; height: 24px; line-height: 24px; text-align: center; border-radius: 50%; z-index: 1; }
+.empty { color: #5c6a75; font: 16px/1.7 var(--hand); padding: 34px 8px; text-align: center; }
+
+.shelf { grid-area: shelf; }
+.bookcase { border: 12px solid var(--wood-dark); border-bottom-width: 16px; background: #5a4332; border-radius: 4px;
+  box-shadow: 0 8px 14px rgba(30, 40, 50, .3); }
+.row { display: flex; flex-wrap: wrap; align-items: flex-end; column-gap: 2px; row-gap: 10px; padding: 0 8px;
+  border-bottom: 10px solid var(--wood); background: repeating-linear-gradient(transparent 0 132px, var(--wood) 132px 142px); }
+.row:last-child { border-bottom: 0; }
+.row > * { height: var(--h, 104px); margin-top: calc(132px - var(--h, 104px)); }
+.rowtag { --h: 92px; width: 30px; margin-right: 6px; background: #efe6d2; color: #3d2f22; font: 15px var(--hand);
+  writing-mode: vertical-rl; text-align: center; line-height: 30px; border-radius: 2px 2px 0 0; overflow: hidden;
+  box-shadow: inset 0 -6px 0 #cdbd9c; }
+.book { width: var(--w); background: linear-gradient(90deg, rgba(0, 0, 0, .22), transparent 20%, transparent 78%, rgba(255, 255, 255, .14)), var(--c);
+  color: var(--t, #fff); border-radius: 2px 2px 0 0; font: 14px var(--hand); writing-mode: vertical-rl; line-height: var(--w);
+  padding: 14px 0 8px; overflow: hidden; white-space: nowrap; position: relative; text-align: start; transition: transform .15s; }
+.book::before { content: ""; position: absolute; left: 0; right: 0; top: 7px; height: 3px; background: currentColor; opacity: .5; }
+.book:hover { transform: translateY(-5px); }
+.book.shown::after { content: ""; position: absolute; left: 50%; top: 0; width: 8px; height: 20px; margin-left: -4px;
+  background: var(--amber); clip-path: polygon(0 0, 100% 0, 100% 100%, 50% 72%, 0 100%); }
+.book.recent { box-shadow: 0 -3px 12px 1px rgba(242, 179, 90, .9); }
+.book.nudge, .frame.nudge .glass, .diary.nudge, .pin.nudge { animation: nudge .35s; }
+@keyframes nudge { 30% { translate: -3px 0; } 60% { translate: 3px 0; } }
+.rowempty { color: #cbb99d; font-size: 13px; align-self: center; margin: 0; height: auto; padding: 50px 8px; }
+
+.tip { position: fixed; z-index: 20; max-width: 260px; padding: 9px 12px; border-radius: 8px; pointer-events: none;
+  background: #1f2a33; color: #eef2f5; font-size: 13px; line-height: 1.5; box-shadow: 0 6px 18px rgba(0, 0, 0, .3); }
+.tip b { display: block; font: 16px var(--hand); }
+.tip em { font-style: normal; color: #f2c988; display: block; }
+.foot { color: var(--muted); font-size: 13px; margin-top: 14px; }
+
+/* ---------- reader ---------- */
+dialog { border: 0; padding: 0; background: transparent; max-width: min(760px, 94vw); max-height: 90vh; overflow: visible; }
+dialog::backdrop { background: rgba(14, 20, 28, .62); }
+.paper { background: #fffdf8; color: #24303a; padding: 38px 44px 44px; border-radius: 3px; max-height: 90vh; overflow: auto;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, .45); font: 19px/1.9 var(--hand); }
+.paper h2 { margin: 0 0 4px; font: 600 28px/1.3 var(--hand); }
+.paper .meta { font: 13px var(--ui); color: #5c6a75; margin-bottom: 18px; }
+.paper .tag { display: inline-block; margin: 0 0 22px; font-size: 16px; }
+.paper p { margin: 0 0 1em; white-space: pre-wrap; overflow-wrap: anywhere; }
+.paper h3 { font: 600 21px/1.4 var(--hand); margin: 1.4em 0 .5em; }
+.paper hr { border: 0; border-top: 1px solid #d9d2c2; margin: 1.6em 0; }
+.paper img { max-width: 100%; display: block; margin: 0 auto; }
+.close { position: absolute; right: -6px; top: -40px; color: #fff; font-size: 14px; padding: 6px 10px; }
+
+/* ---------- growing ---------- */
+.grow { max-width: 820px; }
+.grow h2 { font: 600 24px/1.3 var(--hand); margin: 8px 0 4px; }
+.grow .intro { color: var(--muted); margin: 0 0 14px; }
+.toggle { display: inline-flex; gap: 8px; align-items: center; font-size: 14px; color: var(--muted); margin-bottom: 20px; }
+.version { position: relative; padding: 0 0 30px 30px; border-left: 2px solid var(--line); margin-left: 8px; }
+.version:last-child { border-left-color: transparent; }
+.version::before { content: ""; position: absolute; left: -8px; top: 5px; width: 14px; height: 14px; border-radius: 50%;
+  background: var(--sea); box-shadow: 0 0 0 4px var(--page); }
+.version.latest::before { background: var(--amber); }
+.version h3 { margin: 0; font: 600 18px/1.5 var(--ui); display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; }
+.version h3 small { font-weight: 400; font-size: 13px; color: var(--muted); }
+.plus { color: var(--amber-deep); } .minus { color: var(--gone); }
+.body { margin-top: 10px; padding: 18px 22px; background: var(--card); border-radius: 8px; white-space: pre-wrap;
+  overflow-wrap: anywhere; font: 17px/1.9 var(--hand); box-shadow: inset 0 0 0 1px var(--line); }
+.body ins { text-decoration: none; background: rgba(242, 179, 90, .38); border-radius: 2px; padding: 1px 0; }
+.body del { color: var(--gone); text-decoration-thickness: 1px; opacity: .85; }
+.body .skip { display: block; text-align: center; color: var(--muted); font: 13px var(--ui); margin: .4em 0; }
+
+@media (max-width: 1000px) {
+  .room { grid-template-columns: minmax(0, 1fr); grid-template-areas: "window" "desk" "wall" "case" "shelf";
+    padding: 22px 16px 50px; align-items: stretch; }
+  .window { max-width: 290px; }
+  nav { margin-left: 0; }
+  .paper { padding: 26px 22px 30px; font-size: 18px; }
+}
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>她的房间</h1>
+    <div class="sub">从外面看。只有她摆进橱窗的东西能打开。</div>
+  </div>
+  <nav role="tablist">
+    <button role="tab" id="tab-room" aria-selected="true">房间</button>
+    <button role="tab" id="tab-self" aria-selected="false">长成现在这样</button>
+  </nav>
+  <div class="nowchip" id="now" aria-live="polite"></div>
+</header>
+<main>
+  <section id="view-room">
+    <div class="room" id="room"></div>
+    <p class="foot" id="foot"></p>
+  </section>
+  <section id="view-self" class="grow" hidden></section>
+</main>
+<div class="tip" id="tip" hidden></div>
+<dialog id="reader"></dialog>
+<script>
+"use strict";
+const BOOK_COLORS = ["#6f8fa8", "#34506a", "#9ab0bd", "#c98f6b", "#b5654a", "#d9b96a", "#7f9a84", "#8c7aa6", "#c7a3a0", "#4f6b6b"];
+const state = { room: "", now: "", self: "", data: null, live: null, onlyChanges: true };
+
+function el(tag, attrs, ...kids) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(attrs || {})) {
+    if (value === false || value == null) continue;
+    if (key === "class") node.className = value;
+    else if (key === "style") node.style.cssText = value;
+    else if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
+    else node.setAttribute(key, value === true ? "" : value);
+  }
+  for (const kid of kids.flat()) if (kid != null && kid !== false) node.append(kid);
+  return node;
+}
+const byId = (id) => document.getElementById(id);
+async function get(url) {
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) throw new Error(response.status);
+  return response.text();
+}
+function hash(text) {
+  let h = 7;
+  for (const ch of text) h = (h * 31 + ch.codePointAt(0)) >>> 0;
+  return h;
+}
+function ago(iso) {
+  if (!iso) return "";
+  const then = new Date(iso), seconds = (Date.now() - then) / 1000;
+  if (seconds < 90) return "刚刚";
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟前`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时前`;
+  if (seconds < 86400 * 7) return `${Math.floor(seconds / 86400)} 天前`;
+  return `${then.getMonth() + 1}月${then.getDate()}日`;
+}
+function clock(iso) {
+  const d = new Date(iso), two = (n) => String(n).padStart(2, "0");
+  return `${d.getMonth() + 1}月${d.getDate()}日 ${two(d.getHours())}:${two(d.getMinutes())}`;
+}
+function sizeOf(thing) {
+  if (thing.chars != null) return `${thing.chars.toLocaleString("zh-CN")} 字`;
+  if (thing.bytes < 1024) return `${thing.bytes} 字节`;
+  if (thing.bytes < 1048576) return `${Math.round(thing.bytes / 1024)} KB`;
+  return `${(thing.bytes / 1048576).toFixed(1)} MB`;
+}
+function seen() {
+  try { return JSON.parse(localStorage.getItem("seen") || "{}"); } catch { return {}; }
+}
+function markSeen(thing) {
+  try { localStorage.setItem("seen", JSON.stringify({ ...seen(), [thing.path]: thing.since })); } catch {}
+}
+
+/* ----- tooltip ----- */
+const tip = byId("tip");
+function hint(node, lines) {
+  const show = () => {
+    tip.replaceChildren(...lines().map(([tag, text]) => el(tag, null, text)));
+    tip.hidden = false;
+    const box = node.getBoundingClientRect(), mine = tip.getBoundingClientRect();
+    let left = box.left + box.width / 2 - mine.width / 2, top = box.top - mine.height - 10;
+    if (top < 8) top = box.bottom + 10;
+    tip.style.left = `${Math.max(8, Math.min(left, innerWidth - mine.width - 8))}px`;
+    tip.style.top = `${top}px`;
+  };
+  const hide = () => { tip.hidden = true; };
+  node.addEventListener("mouseenter", show);
+  node.addEventListener("focus", show);
+  node.addEventListener("mouseleave", hide);
+  node.addEventListener("blur", hide);
+}
+function closed(node) {
+  node.classList.remove("nudge");
+  void node.offsetWidth;
+  node.classList.add("nudge");
+}
+
+/* ----- the room ----- */
+function about(thing, closedLine) {
+  return () => [
+    ["b", thing.name],
+    ["span", `${sizeOf(thing)} · ${ago(thing.modified)}动过`],
+    ["em", thing.shown ? "摆在橱窗里，点开看" : closedLine],
+  ];
+}
+function act(thing, node) {
+  if (thing.shown) openThing(state.data.showcase.find((s) => s.path === thing.path) || thing);
+  else closed(node);
+}
+function book(thing) {
+  const h = hash(thing.path), color = BOOK_COLORS[h % BOOK_COLORS.length];
+  const amount = thing.chars != null ? thing.chars : thing.bytes / 3;
+  const width = Math.round(Math.max(22, Math.min(48, 16 + Math.sqrt(amount) * 0.42)));
+  const height = 92 + (h >> 4) % 30;
+  const light = ["#9ab0bd", "#d9b96a", "#c7a3a0"].includes(color);
+  const recent = Date.now() - new Date(thing.modified) < 86400000;
+  const node = el("button", {
+    class: `book${thing.shown ? " shown" : ""}${recent ? " recent" : ""}`,
+    style: `--w:${width}px;--h:${height}px;--c:${color};--t:${light ? "#2b2620" : "#fff"}`,
+    "aria-label": `${thing.name}，${thing.shown ? "在橱窗里，可以打开" : "合着的"}`,
+  }, thing.name);
+  node.addEventListener("click", () => act(thing, node));
+  hint(node, about(thing, "合着的，打不开"));
+  return node;
+}
+function shelf(data) {
+  const rows = data.shelves.map((row) => el("div", { class: "row" },
+    el("span", { class: "rowtag", title: row.name }, row.name),
+    row.things.length ? row.things.map(book) : el("p", { class: "rowempty" }, "这一层还空着")));
+  return el("div", { class: "shelf" },
+    el("p", { class: "label" }, "书架 · 每一层是她自己分的"),
+    rows.length ? el("div", { class: "bookcase" }, rows)
+      : el("div", { class: "bookcase" }, el("div", { class: "row" }, el("p", { class: "rowempty" }, "书架还是空的"))));
+}
+function wall(data) {
+  const frames = data.pictures.map((thing) => {
+    const glass = el("button", { class: "glass", "aria-label": `${thing.name}，${thing.shown ? "可以看" : "盖着布"}` },
+      thing.shown && el("img", { src: `/api/shown?path=${encodeURIComponent(thing.path)}`, alt: thing.name, loading: "lazy" }));
+    const node = el("div", { class: "frame" }, glass, el("span", { class: "plate" }, thing.name));
+    glass.addEventListener("click", () => act(thing, node));
+    hint(glass, about(thing, "画框盖着布，她没摆出来"));
+    return node;
+  });
+  const pins = data.loose.map((thing) => {
+    const node = el("button", { class: "pin" }, thing.name, el("small", null, sizeOf(thing)));
+    node.addEventListener("click", () => act(thing, node));
+    hint(node, about(thing, "折起来钉着，打不开"));
+    return node;
+  });
+  return el("div", { class: "wall" },
+    el("p", { class: "label" }, "墙上"),
+    frames.length + pins.length ? el("div", { class: "hung" }, frames, pins)
+      : el("p", { class: "empty" }, "墙上还什么都没挂"));
+}
+function showcase(data) {
+  const known = seen();
+  const items = data.showcase.map((thing) => {
+    const fresh = known[thing.path] !== thing.since;
+    const face = thing.kind === "picture"
+      ? el("img", { src: `/api/shown?path=${encodeURIComponent(thing.path)}`, alt: thing.name, loading: "lazy" })
+      : el("span", { class: "sheet" }, thing.name);
+    const node = el("button", { class: "exhibit", "aria-label": `打开 ${thing.name}` },
+      fresh && el("span", { class: "fresh-mark", title: "新摆出来的" }, "新"), face,
+      thing.note && el("span", { class: "tag" }, thing.note));
+    node.addEventListener("click", () => openThing(thing));
+    hint(node, () => [["b", thing.name], ["span", `${sizeOf(thing)} · ${ago(thing.since)}摆出来的`], ["em", "点开看"]]);
+    return node;
+  });
+  return el("div", { class: "case" }, el("div", { class: "cabinet" },
+    items.length ? el("div", { class: "shown" }, items)
+      : el("p", { class: "empty" }, "橱窗还空着。", el("br"), "她想给你看什么的时候，会自己摆进来。")));
+}
+function calendar(diary) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  // Five weeks ending this week, Monday first.
+  const start = new Date(today); start.setDate(today.getDate() - ((today.getDay() + 6) % 7) - 28);
+  const cells = [];
+  for (let i = 0; i < 35; i++) {
+    const day = new Date(start); day.setDate(start.getDate() + i);
+    const key = `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, "0")}-${String(day.getDate()).padStart(2, "0")}`;
+    const count = diary.days[key] || 0, future = day > today;
+    cells.push(el("span", {
+      class: `day${count ? ` n${Math.min(3, count)}` : ""}${day.getTime() === today.getTime() ? " today" : ""}`,
+      style: future ? "visibility:hidden" : null,
+      title: `${day.getMonth() + 1}月${day.getDate()}日${count ? ` 写了 ${count} 篇` : " 没写"}`,
+    }));
+  }
+  return el("div", { class: "calendar" },
+    el("h3", null, "她哪天写了日记"),
+    el("div", { class: "days" }, cells),
+    el("small", null, "最近五个星期，颜色越深写得越多"));
+}
+function desk(data) {
+  const diary = data.diary;
+  const cover = el("button", { class: "diary", id: "diary", "aria-label": "她的日记，合着的" }, "日记");
+  cover.addEventListener("click", () => closed(cover));
+  hint(cover, () => [["b", "她的日记"],
+    ["span", diary.entries ? `${diary.entries} 篇，共 ${diary.chars.toLocaleString("zh-CN")} 字` : "还没写过"],
+    ["em", "扣着的，只有她自己能翻"]]);
+  return el("div", { class: "desk" },
+    calendar(diary),
+    el("div", { class: "desktop" },
+      el("div", { class: "lamp", id: "lamp" }, el("i")),
+      cover,
+      el("div", { class: "diarynote" },
+        el("b", null, diary.entries ? `${diary.entries} 篇` : "还没写过"),
+        diary.last ? ["上次写于", el("br"), ago(diary.last)] : "")),
+    el("div", { class: "table" }));
+}
+function windowPane() {
+  return el("div", { class: "window" },
+    el("div", { class: "pane", title: "窗外是现在的天色" },
+      el("div", { class: "stars" }), el("div", { class: "orb", id: "orb" }), el("div", { class: "seaband" })),
+    el("div", { class: "sill" }));
+}
+function renderRoom() {
+  const data = state.data;
+  byId("room").replaceChildren(windowPane(), desk(data), wall(data), showcase(data), shelf(data));
+  const things = data.shelves.reduce((n, row) => n + row.things.length, 0) + data.loose.length + data.pictures.length;
+  byId("foot").textContent =
+    `房间里有 ${things} 样东西和一本日记，橱窗里摆着 ${data.showcase.length} 样。这个页面只读，不会改动她的任何东西。`;
+  light();
+}
+
+/* ----- sky, lamp, what she is doing ----- */
+const SKY = [
+  [0, "#0b1730", "#1c3156", .30, 1], [4.5, "#0f1d3a", "#27406a", .28, 1], [6, "#4a5f8e", "#f0b497", .14, .2],
+  [8, "#8ec3e6", "#d9eef7", 0, 0], [16, "#86bde3", "#dcebf2", 0, 0], [17.7, "#5a6fa3", "#f3ab78", .10, 0],
+  [19.2, "#1c2c55", "#5a5b86", .22, .6], [21, "#0b1730", "#1c3156", .30, 1], [24, "#0b1730", "#1c3156", .30, 1],
+];
+function mix(a, b, t) {
+  const pa = [1, 3, 5].map((i) => parseInt(a.slice(i, i + 2), 16)), pb = [1, 3, 5].map((i) => parseInt(b.slice(i, i + 2), 16));
+  return `rgb(${pa.map((v, i) => Math.round(v + (pb[i] - v) * t)).join(",")})`;
+}
+function light() {
+  const now = new Date(), hour = now.getHours() + now.getMinutes() / 60;
+  let i = SKY.findIndex((stop) => stop[0] > hour);
+  if (i < 1) i = SKY.length - 1;
+  const [a, b] = [SKY[i - 1], SKY[i]], t = (hour - a[0]) / (b[0] - a[0]);
+  const root = document.documentElement.style;
+  root.setProperty("--sky-top", mix(a[1], b[1], t));
+  root.setProperty("--sky-bottom", mix(a[2], b[2], t));
+  root.setProperty("--dim", (a[3] + (b[3] - a[3]) * t).toFixed(3));
+  root.setProperty("--stars", (a[4] + (b[4] - a[4]) * t).toFixed(2));
+  const orb = byId("orb");
+  if (orb) {
+    const day = hour >= 6 && hour < 18, along = day ? (hour - 6) / 12 : ((hour + 6) % 24) / 12;
+    orb.className = `orb ${day ? "sun" : "moon"}`;
+    orb.style.left = `${12 + along * 76}%`;
+    orb.style.top = `${62 - Math.sin(along * Math.PI) * 44}%`;
+  }
+  const room = byId("room"), lamp = byId("lamp"), live = state.live, data = state.data;
+  if (!lamp || !data) return;
+  const touched = [...data.shelves.flatMap((row) => row.things), ...data.loose, ...data.pictures]
+    .some((thing) => Date.now() - new Date(thing.modified) < 600000);
+  const lit = Boolean(live && live.doing) || touched;
+  room.classList.toggle("lit", lit);
+  root.setProperty("--lamp", lit ? 1 : 0);
+  const box = lamp.getBoundingClientRect(), frame = room.getBoundingClientRect();
+  root.setProperty("--lx", `${box.left - frame.left + box.width / 2}px`);
+  root.setProperty("--ly", `${box.top - frame.top + 30}px`);
+  const diary = byId("diary");
+  if (diary) diary.classList.toggle("writing", Boolean(live && live.doing === "在写日记"));
+}
+function renderNow() {
+  const live = state.live, chip = byId("now");
+  const parts = [el("span", { class: `dot ${live.status.state}${live.doing ? " busy" : ""}` })];
+  if (!live.watching) parts.push(el("span", null, "监视器没开，看不到她这会儿在做什么"));
+  else if (live.doing) parts.push(el("span", null, el("b", null, live.doing), live.where ? ` · ${live.where}` : ""));
+  else parts.push(el("span", null, el("b", null, "发呆中"), live.since ? ` · 上次有动静是 ${ago(live.since)}` : ""));
+  if (live.did) parts.push(el("span", null, `${ago(live.did_at)}${live.did}`));
+  if (live.status.text) parts.push(el("span", { class: "status", title: "她自己写的状态" }, `「${live.status.text}」`));
+  chip.replaceChildren(...parts);
+  light();
+}
+
+/* ----- reader ----- */
+function prose(text) {
+  const out = [];
+  for (const block of text.replace(/\r\n/g, "\n").split(/\n{2,}/)) {
+    const lines = block.split("\n");
+    let run = [];
+    const flush = () => { if (run.length) out.push(el("p", null, run.join("\n"))); run = []; };
+    for (const line of lines) {
+      const heading = /^#{1,6}\s+(.*)$/.exec(line);
+      if (heading) { flush(); out.push(el("h3", null, heading[1])); }
+      else if (/^\s*(-{3,}|\*{3,})\s*$/.test(line)) { flush(); out.push(el("hr")); }
+      else run.push(line);
+    }
+    flush();
+  }
+  return out;
+}
+async function openThing(thing) {
+  const reader = byId("reader"), url = `/api/shown?path=${encodeURIComponent(thing.path)}`;
+  let body;
+  try {
+    body = thing.kind === "picture" ? [el("img", { src: url, alt: thing.name })] : prose(JSON.parse(await get(url)).text);
+  } catch {
+    body = [el("p", null, "这样东西她刚收回去了。")];
+  }
+  const close = el("button", { class: "close" }, "合上 ✕");
+  close.addEventListener("click", () => reader.close());
+  reader.replaceChildren(close, el("div", { class: "paper" },
+    el("h2", null, thing.name),
+    el("div", { class: "meta" }, [sizeOf(thing), thing.since && `${ago(thing.since)}摆出来的`].filter(Boolean).join(" · ")),
+    thing.note && el("span", { class: "tag" }, `她贴的话：${thing.note}`),
+    body));
+  tip.hidden = true;
+  reader.showModal();
+  if (thing.since) { markSeen(thing); if (state.data) renderRoom(); }
+}
+byId("reader").addEventListener("click", (event) => { if (event.target === event.currentTarget) event.currentTarget.close(); });
+
+/* ----- how she grew ----- */
+function diffBody(parts) {
+  const body = el("div", { class: "body" });
+  const changed = parts.some((part) => part.op !== "same");
+  parts.forEach((part, index) => {
+    if (part.op === "new") body.append(el("ins", null, part.text));
+    else if (part.op === "gone") body.append(el("del", null, part.text));
+    else if (state.onlyChanges && changed && part.text.length > 160) {
+      const head = index ? part.text.slice(0, 50) : "", tail = index < parts.length - 1 ? part.text.slice(-50) : "";
+      body.append(head, el("span", { class: "skip" }, `…… 这里 ${part.text.length - head.length - tail.length} 字没动 ……`), tail);
+    } else body.append(part.text);
+  });
+  return body;
+}
+function renderSelf(versions) {
+  const view = byId("view-self");
+  const box = el("input", { type: "checkbox", checked: state.onlyChanges });
+  box.addEventListener("change", () => { state.onlyChanges = box.checked; renderSelf(versions); });
+  const cards = versions.map((version, index) => {
+    const latest = index === versions.length - 1;
+    const title = latest ? "现在的她" : version.first ? "第一次写下的自己" : `第 ${index + 1} 版`;
+    const when = version.at ? clock(version.at) : "什么时候写的没记下来";
+    return el("article", { class: `version${latest ? " latest" : ""}` },
+      el("h3", null, title, el("small", null, when),
+        !version.first && el("small", null, el("span", { class: "plus" }, `添了 ${version.added} 字`), "　",
+          el("span", { class: "minus" }, `去掉 ${version.removed} 字`))),
+      diffBody(version.parts));
+  }).reverse();
+  view.replaceChildren(...[
+    el("h2", null, "她是怎么长成现在这样的"),
+    el("p", { class: "intro" }, "「我是什么样的」那一页是她自己写的，每重写一次，旧的都留着。下面是每一次她改了什么：",
+      el("ins", { style: "background:rgba(242,179,90,.38);text-decoration:none" }, "添上的"), "、",
+      el("del", { style: "color:var(--gone)" }, "去掉的"), "。"),
+    versions.length > 1 && el("label", { class: "toggle" }, box, "只看改动的地方"),
+    versions.length ? cards : el("p", { class: "intro" }, "她还没写过自己的那一页。"),
+  ].flat().filter(Boolean));
+}
+
+/* ----- wiring ----- */
+function tab(name) {
+  for (const key of ["room", "self"]) {
+    byId(`view-${key}`).hidden = key !== name;
+    byId(`tab-${key}`).setAttribute("aria-selected", key === name);
+  }
+  if (location.hash.slice(1) !== name) history.replaceState(null, "", `#${name}`);
+  if (name === "self") refreshSelf();
+}
+byId("tab-room").addEventListener("click", () => tab("room"));
+byId("tab-self").addEventListener("click", () => tab("self"));
+
+async function refreshRoom() {
+  try {
+    const text = await get("/api/room"), data = JSON.parse(text);
+    const key = JSON.stringify({ ...data, now: null });
+    if (key !== state.room && !byId("reader").open) { state.room = key; state.data = data; renderRoom(); }
+  } catch { byId("foot").textContent = "连不上了：dfy-room 是不是关掉了？"; }
+}
+async function refreshNow() {
+  try {
+    const text = await get("/api/now");
+    if (text !== state.now) { state.now = text; state.live = JSON.parse(text); renderNow(); }
+  } catch {}
+}
+async function refreshSelf() {
+  try {
+    const text = await get("/api/self");
+    if (text !== state.self) { state.self = text; renderSelf(JSON.parse(text)); }
+  } catch {}
+}
+tab(location.hash === "#self" ? "self" : "room");
+refreshRoom(); refreshNow();
+setInterval(refreshRoom, 5000);
+setInterval(refreshNow, 2000);
+setInterval(() => { light(); if (!byId("view-self").hidden) refreshSelf(); }, 30000);
+addEventListener("resize", light);
+</script>
+</body>
+</html>

@@ -24,8 +24,9 @@ from datetime import datetime
 
 from openai import APIError
 
+from .ai import error_kind
 from .config import in_peak, parse_quiet_hours
-from .host_agent import fit, loads, request_messages, save_json
+from .host_agent import NOTE_TAG, cut_run_on, fit, loads, request_messages, save_json
 from .host_tools import ToolError, describe_call, monitor_text, what_she_did
 from .images import file_block
 from .streaming import collect_stream
@@ -40,15 +41,25 @@ IDLE_STEPS = 15
 # Her last reply when she does not want to message him.
 SKIP = "（不找他）"
 SKIP_MARK = re.compile(r"[（(]\s*不找他\s*[)）]")
+# How much of her last diary entry she sees again when she is on her own.
+DIARY_PEEK = 800
+GENTLE = (
+    "\n上回写过的，就不用从头再写一遍啦。想写的话，接着上回往下写，"
+    "或者写点新冒出来的心思就好；没什么新鲜的，这回不写也没关系的。"
+)
 NUDGE = """[提示] 这不是主人发的消息。现在是 {now}（周{weekday}），
-主人上次跟你说话是 {ago} 前，这会儿他不在。{pending}{group}
-这会儿是你自己的时间，想干嘛干嘛：写日记，在房间里写点东西，上网逛逛，收张图，
-看看 <self> 那页还像不像现在的你。不想动就发会儿呆。（send_file 这会儿用不了。）
-然后看你想不想找主人。翻到好玩的、想起什么、群里有事、想要个东西、闲得慌、想他了，
-都能发，想发几次发几次，又是鲸鱼也没关系。
-他在上课、上班、写作业，你照样能发，他有空自己会看；他说过喜欢你来找他。
-只是别催他回你。他去睡了就让他睡，有话等他醒了再说。
-他托你到点提醒的事，到点就提醒他。
+主人上次跟你说话是 {ago} 前，这会儿他不在。{pending}{group}{before}
+这会儿是你自己的时间。可以写日记、在房间里写点东西、上网逛逛、收张图、改个状态，也可以什么都不做。
+如果想认真写点什么，可以慢慢写，不受平时聊天篇幅的限制。
+<self> 有持续的新认识时再改，不需要每次检查自己是什么样的。（send_file 这会儿用不了。）
+至于主人——
+有什么想跟他说的，就直接说。
+不一定是重要的事，也不一定要有理由。（比如说想他了）
+可能是一件有趣的发现、一个突然冒出的念头，也可能只是想起了之前没聊完的话题。
+没有新内容也很正常，不需要为了完成这次提示而找他、写日记或展示性格。
+他忙时可以把值得分享的话留给他有空再看。
+他明确说要睡或想独处时，就尊重这段时间。
+不催他回复。他托你到点提醒的事，到点就提醒他。
 想发，就把要发给他的话写出来当最后的回复，跟平时私聊一样说话，别提这条提示；
 不想发，就只回 {skip}。"""
 
@@ -156,6 +167,9 @@ class Initiative:
         cap = settings.agent_initiative_per_day
         if cap and self.sent_today() >= cap:
             return False
+        group = self.agent.group
+        if group is not None and group.watching_owner():
+            return False  # She is watching his stream with him: he is right here.
         channel = await self.agent.latest_channel()
         if channel is None:
             return False
@@ -175,6 +189,8 @@ class Initiative:
                 await store.last_message_at(channel, "user") or 0.0,
                 await store.last_message_at(channel, "assistant") or 0.0,
                 *self.sent[-1:],
+                # Him talking in the group counts too: he is around, not away.
+                group.owner_seen_at if group is not None else 0.0,
             ]
         )
         idle = self.clock() - last
@@ -195,6 +211,7 @@ class Initiative:
         """Her quiet spell: she may do her own things, then returns what to send him."""
         agent = self.agent
         history = await agent.store.load(channel)
+        await agent.refresh_self(channel)  # Her quiet spell is a turn of its own.
         system = await agent.system_message(channel)
         moment = self.now()
         nudge = NUDGE.format(
@@ -210,6 +227,7 @@ class Initiative:
                 and (digest := agent.group.digest_since(agent.group_seen))
                 else ""
             ),
+            before=await self._before(channel),
             skip=SKIP,
         )
         turn = [{"role": "user", "content": nudge}]
@@ -231,7 +249,7 @@ class Initiative:
                 if message is None:
                     return None
                 if not message.tool_calls:
-                    text = (message.content or "").strip()
+                    text, _ = cut_run_on((message.content or "").strip())
                     break
                 await self._use_tools(channel, message, turn, done, publisher)
         finally:
@@ -248,6 +266,20 @@ class Initiative:
         if skipped:
             return None
         return agent.sanitize(text)[:4000]
+
+    async def _before(self, channel) -> str:
+        """What she already did while he was away, and her last diary entry, so she goes
+        on from there instead of starting over each time."""
+        agent = self.agent
+        parts = []
+        if notes := [
+            note.removeprefix(NOTE_TAG).strip() for note in agent.activity.get(channel, [])
+        ]:
+            parts.append("\n他不在的这阵子，你自己做过的事：\n" + "\n".join(notes))
+        if last := await asyncio.to_thread(agent.room.last_diary):
+            peek = last if len(last) <= DIARY_PEEK else last[:DIARY_PEEK] + "……"
+            parts.append(f"\n你上一篇日记是这样写的：\n{peek}{GENTLE}")
+        return "".join(parts)
 
     async def _complete(self, system, conversation, publisher=None):
         agent = self.agent
@@ -276,7 +308,7 @@ class Initiative:
                 if stream:
                     response = await collect_stream(response, publisher, request_id)
         except (TimeoutError, APIError) as error:
-            log.warning("Initiative request failed; error_type=%s", type(error).__name__)
+            log.warning("Initiative request failed; error_type=%s", error_kind(error))
             if publisher:
                 publisher.event("model-status", status="failed", request_id=request_id)
             return None

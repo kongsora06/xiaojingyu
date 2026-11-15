@@ -15,6 +15,12 @@ places:
   web search, her Discord status and profile (with the owner's OK), and the group. No shell
   and no access to other files. She can also message the owner first after a quiet spell.
   See the [Personal Mode guide](docs/personal.md).
+- **Looking in** (read-only, local): `uv run dfy-room` draws her room as a page: shelves,
+  frames and a closed diary seen from outside; only what she put in her showcase opens.
+  It also shows how her self-portrait changed between rewrites. `uv run dfy-widget` is a
+  small always-on-top window saying what she is doing right now, and `uv run dfy-pet` puts
+  her picture on the desktop: poke her and she bounces, drag her and she dangles. The pet
+  writes one thing: pats and head rubs, which she hears of with your next DM.
 
 Both sides share the fixed part of her persona in [`persona.md`](src/discord_dfy/persona.md) (name,
 relationship, how she talks), her self-portrait `data/self.md` (who she is, which she rewrites
@@ -90,7 +96,8 @@ Fetch API).
 
 Everything personal stays local and out of Git (`.gitignore` covers `.env` and `data/`):
 `data/memory.md` (her long-term memory), `data/memory/` (a page per day, weekly summaries and their index), `data/self.md` and `data/self-history/` (who she says she is,
-rewritten by her), `data/room/` (her room and diary — hers alone),
+rewritten by her), `data/room/` (her room and diary — hers alone; `data/room-showcase.json` lists what she
+put out for the owner to open),
 `data/personal.sqlite3` (DM history), `data/bot.sqlite3` (group messages and decision
 metadata), `data/stickers/`, `data/dm_images/`, logs and monitor events. Set `STORE_MESSAGES=false` to stop storing group messages; the bot still reads recent
 chat in memory to follow the conversation. Logs never include message content and redact
@@ -106,7 +113,11 @@ src/discord_dfy/
   discord_bot.py         Discord events, slash commands, delivery
   group_chat.py          Group chat brain: timing, plans, stickers, search, status
   host_agent.py          Owner-DM loop, commands, texting delivery, looking back into memory
-  host_tools.py          Her things: notebook, diary, room, saving pictures
+  host_tools.py          Her things: notebook, diary, room, showcase, saving pictures
+  room_view.py, room.html  dfy-room: her room drawn as a local read-only page
+  now.py, widget.py      What she is doing right now; dfy-widget, a corner-of-the-screen window
+  pet.py, pet_body.py    dfy-pet: her picture on the desktop, bouncy to the touch (Windows)
+  pet_touch.py           Pats and head rubs on the pet, told to her with his next DM
   initiative.py          Reaching out to the owner first
   memory.py              The shared long-term memory: notes, sections, tidying
   journal.py             Day pages, weekly archive, looking back, searching old weeks

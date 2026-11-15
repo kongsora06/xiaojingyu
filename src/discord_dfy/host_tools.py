@@ -20,7 +20,7 @@ import httpx2
 from .images import MAX_IMAGE_BYTES, image_type
 from .journal import JOURNAL_SECTION
 from .memory import MEMORY_SECTIONS
-from .stickers import INDEX as STICKER_INDEX
+from .stickers import StickerBook, StickerError
 
 MAX_OUTPUT_CHARS = 30000
 MAX_SEND_BYTES = 10 * 1024 * 1024
@@ -29,8 +29,9 @@ MAX_LIST_ENTRIES = 200
 DIARY_DIR = "diary"
 PICTURE_DIR = "pictures"
 MAX_REDIRECTS = 3
-# A line that is only "[表情包：名字]" in a DM reply is sent as that sticker.
-STICKER_LINE = re.compile(r"^\s*\[表情包[:：]\s*(.+?)\s*\]\s*$")
+# The showcase: the few things in her room she has put out for him to open.
+MAX_SHOWN = 24
+MAX_NOTE_CHARS = 200
 BAD_NAME = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 
 TOOLS = [
@@ -39,7 +40,7 @@ TOOLS = [
         "function": {
             "name": "remember",
             "description": (
-                "在小本子上记一句。想记就当场记，记你在意的事和当时的感觉。"
+                "在小本子上记一句，记具体发生的事和对话中实际表达过的感受，不补写动机或情绪。"
                 "今天发生的事选「今天」，记在今天这页、带上时间；"
                 "觉得以后可能要紧，就把 important 打上。"
                 "关于主人、你们之间、你自己、群里谁的长久的事，选对应的那一节。"
@@ -65,6 +66,7 @@ TOOLS = [
             "description": (
                 "重写 <self>：你自己写的“我是个什么样的人”"
                 "（性格、脾气、喜好、说话方式、跟主人怎么相处、在意的东西）。"
+                "是 persona 相处基调的具体展开；有持续的新认识再改，一次嘴硬或拒绝不定成稳定性格。"
                 "整篇换成新写的，用第一人称，4000 字以内；旧的会自动留底。"
             ),
             "parameters": {
@@ -80,6 +82,7 @@ TOOLS = [
             "name": "write_diary",
             "description": (
                 "写一篇日记，自动记上日期和时间：今天过得怎样、心情、在想什么，写给自己看的。"
+                "篇幅随内容，可以短记也可以长篇，不受日常闲聊简短的要求限制。"
             ),
             "parameters": {
                 "type": "object",
@@ -149,6 +152,7 @@ TOOLS = [
             "description": (
                 "在房间里写一个文字文件（没有的文件夹会自动建）。append=true 接在后面写，"
                 "不然就整篇换成新内容。"
+                "可以自由写故事、信、随笔、诗等，题材和形式自定，长篇也可以，不必压缩成聊天短句。"
             ),
             "parameters": {
                 "type": "object",
@@ -164,10 +168,31 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "room_show",
+            "description": (
+                "把房间里的一样东西（你写的一篇东西，或一张图）摆进橱窗，或者从橱窗收回去。"
+                "橱窗是房间里唯一主人能打开看的地方；摆进去的是那样东西本身，你之后再改它，他看到的也是改过的。"
+                "note 是你想贴在旁边的一句话，可以不写。show=false 是收回去。日记不能摆。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "房间里的路径"},
+                    "note": {"type": "string", "description": "贴在旁边的一句话"},
+                    "show": {"type": "boolean", "description": "不写就是摆进去"},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "save_picture",
             "description": (
-                "把一张图片收进房间的 pictures 文件夹。source 是网上图片的直链（http/https），"
-                "或者房间里已有的图片。sticker=true 时同时加进你的表情包，when 写什么时候用它。"
+                "把一张图片收进房间的 pictures 文件夹。source 是网上图片的直链（http/https）、"
+                "房间里已有的图片，或者主人发给你的图（写图旁边标的名字）。"
+                "sticker=true 时同时加进你的表情包，when 写什么时候用它。"
             ),
             "parameters": {
                 "type": "object",
@@ -185,10 +210,24 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "send_file",
-            "description": "把房间里的一个文件（图片、你写的东西，最大 10 MB）发给主人。",
+            "description": (
+                "把房间里的一个文件（图片、你写的东西，最大 10 MB）发给主人，或者发到群里。"
+                "发到群里和 group_post 一样，只在主人让你发的时候用。"
+            ),
             "parameters": {
                 "type": "object",
-                "properties": {"path": {"type": "string", "description": "房间里的路径"}},
+                "properties": {
+                    "path": {"type": "string", "description": "房间里的路径"},
+                    "to": {
+                        "type": "string",
+                        "enum": ["主人", "群里"],
+                        "description": "发给谁，不填就是发给主人",
+                    },
+                    "channel": {
+                        "type": "string",
+                        "description": "发到群里时用：频道名、频道 ID 或服务器名；只有一个群聊频道时可以省略",
+                    },
+                },
                 "required": ["path"],
             },
         },
@@ -344,17 +383,24 @@ class Room:
         return target
 
     def image_path(self, path) -> Path:
-        """A picture in the room, or one the owner sent (by its stored path)."""
+        """A picture in the room, or one the owner sent (by its stored path, or just the
+        file name it was shown to her with)."""
         if isinstance(path, str) and path.strip():
             candidate = Path(path.strip()).resolve()
             for directory in self.image_dirs:
                 directory = directory.resolve()
                 if directory in candidate.parents:
                     return candidate
+            bare = path.strip()
+            if Path(bare).name == bare and not self.resolve(bare).is_file():
+                for directory in self.image_dirs:
+                    if (sent := directory.resolve() / bare).is_file():
+                        return sent
         return self.resolve(path)
 
     def show(self, path: Path) -> str:
-        return path.relative_to(self.root.resolve()).as_posix() or "."
+        # The room may be configured as a relative path; compare both resolved.
+        return path.resolve().relative_to(self.root.resolve()).as_posix() or "."
 
     def list(self, path="") -> str:
         base = self.resolve(path) if path else self.root.resolve()
@@ -369,7 +415,34 @@ class Room:
         ]
         if len(entries) > MAX_LIST_ENTRIES:
             lines.append(f"……还有 {len(entries) - MAX_LIST_ENTRIES} 项")
+        if not path and (shown := read_showcase(self.root)):
+            lines.append("橱窗里摆着：" + "、".join(item["path"] for item in shown))
         return "\n".join(lines) or "这里还是空的"
+
+    def display(self, path, note, now: datetime) -> str:
+        """Put one of her things in the showcase, where he may open it."""
+        target = self.resolve(path)
+        if not target.is_file():
+            raise ToolError(f"要摆一样具体的东西，房间里没有这个文件：{path}")
+        shown = self.show(target)
+        if shown.split("/")[0] == DIARY_DIR:
+            raise ToolError("日记不摆橱窗。想给他看哪一篇，抄一份出来再摆，或者直接发给他")
+        note = " ".join(str(note or "").split())[:MAX_NOTE_CHARS]
+        items = [item for item in read_showcase(self.root) if item["path"] != shown]
+        if len(items) >= MAX_SHOWN:
+            raise ToolError(f"橱窗摆满了（{MAX_SHOWN} 样），先收回去一样")
+        items.append({"path": shown, "note": note, "since": now.isoformat(timespec="seconds")})
+        write_showcase(self.root, items)
+        return f"摆进橱窗了：{shown}"
+
+    def put_away(self, path) -> str:
+        shown = self.show(self.resolve(path))
+        items = read_showcase(self.root)
+        kept = [item for item in items if item["path"] != shown]
+        if len(kept) == len(items):
+            return f"橱窗里本来就没有：{shown}"
+        write_showcase(self.root, kept)
+        return f"从橱窗收回来了：{shown}"
 
     def read(self, path) -> str:
         target = self.resolve(path)
@@ -416,6 +489,14 @@ class Room:
         recent = [e for path in files[-2:] for e in entries_of(read_text(path))][-5:]
         return clip("\n".join(recent)) if recent else "还没写过日记"
 
+    def last_diary(self) -> str | None:
+        """Her latest entry, heading included, or None before she has written one."""
+        folder = self.root / DIARY_DIR
+        for path in sorted(folder.glob("*.md"), reverse=True) if folder.is_dir() else []:
+            if entries := entries_of(read_text(path)):
+                return entries[-1]
+        return None
+
     def check_send(self, path) -> Path:
         target = self.resolve(path)
         if not target.is_file():
@@ -440,27 +521,42 @@ class Room:
         return target
 
     def add_sticker(self, picture: Path, name, when) -> str:
-        name = " ".join(str(name or "").split())[:40]
-        if not name:
-            raise ToolError("表情包要有名字")
-        index = self.sticker_dir / STICKER_INDEX
         try:
-            entries = json.loads(index.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            entries = []
-        if not isinstance(entries, list):
-            entries = []
-        if any(isinstance(e, dict) and e.get("name") == name for e in entries):
-            raise ToolError(f"已经有叫「{name}」的表情包了，换个名字")
-        self.sticker_dir.mkdir(parents=True, exist_ok=True)
-        stem, suffix = clean_name(name), picture.suffix
-        file, number = self.sticker_dir / f"{stem}{suffix}", 2
-        while file.exists():
-            file, number = self.sticker_dir / f"{stem}-{number}{suffix}", number + 1
-        file.write_bytes(picture.read_bytes())
-        entries.append({"name": name, "file": file.name, "when": str(when or "").strip()[:80]})
-        index.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
-        return name
+            return StickerBook(self.sticker_dir).add(picture.read_bytes(), name, when)
+        except StickerError as error:
+            raise ToolError(str(error)) from error
+
+
+def showcase_path(room_dir) -> Path:
+    """The list of what she has put out. It sits next to the room, not in it, so nothing
+    she writes in the room can change what he is allowed to open."""
+    room_dir = Path(room_dir)
+    return room_dir.with_name(f"{room_dir.name}-showcase.json")
+
+
+def read_showcase(room_dir) -> list[dict]:
+    """[{"path": "诗/秋天.md", "note": "...", "since": "2026-11-10T12:00:00+08:00"}]"""
+    try:
+        data = json.loads(showcase_path(room_dir).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [
+        {
+            "path": item["path"],
+            "note": str(item.get("note") or ""),
+            "since": str(item.get("since") or ""),
+        }
+        for item in data
+        if isinstance(item, dict) and isinstance(item.get("path"), str) and item["path"]
+    ]
+
+
+def write_showcase(room_dir, items: list[dict]) -> None:
+    path = showcase_path(room_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(items, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
 def size(path: Path) -> str:
@@ -541,6 +637,10 @@ def what_she_did(name: str, arguments: dict) -> str | None:
         return "重写了 <self> 里自己写的“我”"
     if name == "room_write":
         return f"在房间里写了 {path}"
+    if name == "room_show":
+        if arguments.get("show") is False:
+            return f"把 {path} 从橱窗收回来了"
+        return f"把 {path} 摆进了橱窗"
     if name == "save_picture":
         picture = str(arguments.get("name") or "").strip()
         return f"收了一张图「{picture}」" + ("，加进了表情包" if arguments.get("sticker") else "")
@@ -552,9 +652,16 @@ def what_she_did(name: str, arguments: dict) -> str | None:
         return f"看了网页 {str(arguments.get('url') or '').strip()[:120]}"
     if name == "group_post":
         return f"在群里说了：{str(arguments.get('text') or '').strip()[:80]}"
+    if name == "send_file" and to_group(arguments):
+        return f"在群里发了 {path}"
     if name == "update_profile":
         return f"改了自己的{arguments.get('field', '')}"
     return None  # Just looking around (reading, listing, viewing) is not worth a line.
+
+
+def to_group(arguments: dict) -> bool:
+    """send_file aimed at a group channel rather than at him."""
+    return str(arguments.get("to") or "").strip() == "群里"
 
 
 # What she writes or reads in her room and diary stays out of the monitor; he won't look.
@@ -579,6 +686,12 @@ def describe_call(name: str, arguments: dict) -> str:
         detail = arguments.get("query", "")
     elif name in {"web_fetch", "save_picture"}:
         detail = arguments.get("url") or arguments.get("source", "")
+    elif name == "send_file" and to_group(arguments):
+        detail = f"群里 {arguments.get('channel') or ''} {arguments.get('path', '')}"
+    elif name == "room_show":
+        detail = (
+            f"{'收回' if arguments.get('show') is False else '摆出'} {arguments.get('path', '')}"
+        )
     elif name in {"room_read", "room_write", "room_list", "send_file", "view_image"}:
         detail = arguments.get("path", "")
     elif name == "remember":

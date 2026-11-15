@@ -6,8 +6,10 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "aiosqlite>=0.22.1",
-    "discord-py>=2.7.1",
+    "discord-py[voice]>=2.7.1",
+    "mss>=10.2.0",
     "openai>=3.35.1",
+    "pillow>=13.0.0",
     "python-dotenv>=1.2.4",
     "rich>=14.0,<15",
 ]
@@ -33,6 +35,12 @@ select = ["E", "F", "I", "UP", "B", "ASYNC"]
 [project.scripts]
 discord-dfy = "discord_dfy:main"
 dfy-monitor = "discord_dfy.monitor:main"
+dfy-room = "discord_dfy.room_view:main"
+
+# No console window: it is started to sit in a corner of the screen.
+[project.gui-scripts]
+dfy-widget = "discord_dfy.widget:main"
+dfy-pet = "discord_dfy.pet:main"
 
 [build-system]
 requires = ["uv_build>=0.12.15,<0.13.0"]

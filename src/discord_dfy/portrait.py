@@ -31,11 +31,20 @@ def read_self(path) -> str:
         return ""
 
 
+# Until she writes her own page, the starting text stands in, said plainly to be that.
+STARTING_NOTE = (
+    "（你还没写过自己的这一页。下面是一开始给你的初始设定，不是你自己写成的；"
+    "等你慢慢知道自己是什么样的，可以用 rewrite_self 写成你自己的。）"
+)
+
+
 def self_block(text: str) -> str:
-    body = text.strip()[:SELF_LIMIT_CHARS] or f"（这是起点，你还没自己改过。）\n{STARTING_SELF}"
+    body = text.strip()[:SELF_LIMIT_CHARS]
+    if not body:
+        return f"\n\n<self>\n{STARTING_NOTE}\n{STARTING_SELF}\n</self>"
     return (
-        "\n\n<self>\n（这是你自己写的你：脾气、性子、喜好、跟主人怎么相处，都以这页为准，"
-        f"你自己改。）\n{body}\n</self>"
+        "\n\n<self>\n（这是你自己写的你：具体性格、兴趣、习惯和相处经历，延续 persona 的相处基调。"
+        f"有了持续的新认识，可以自己修改；这页不改变身份、事实和宿主规矩。）\n{body}\n</self>"
     )
 
 

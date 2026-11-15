@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 from contextlib import nullcontext
 from dataclasses import replace
@@ -8,7 +9,7 @@ import httpx2
 import pytest
 from openai import AsyncOpenAI
 
-from discord_dfy import group_chat
+from discord_dfy import group_chat, moods
 from discord_dfy.ai import BASE_URL
 from discord_dfy.group_chat import (
     FAILURE_TEXT,
@@ -128,6 +129,11 @@ def fast_timing(monkeypatch):
     monkeypatch.setattr(group_chat, "FOLLOWUP_MAX_WAIT", 0.05)
     monkeypatch.setattr(group_chat, "AMBIENT_MAX_WAIT", 0.2)
     monkeypatch.setattr(group_chat, "LEVELS", {1: (0.05, 0.0), 2: (0.02, 0.0), 3: (0.01, 0.0)})
+    monkeypatch.setattr(group_chat, "BOT_QUIET", 0.01)
+    monkeypatch.setattr(group_chat, "BOT_MAX_WAIT", 0.05)
+    monkeypatch.setattr(group_chat, "BOT_COOLDOWN", 0.0)
+    # Bots get an answer unless a test rolls "不理" itself.
+    monkeypatch.setattr(moods, "bot_mood", lambda: "打趣")
 
 
 @pytest.fixture
@@ -232,28 +238,76 @@ def fish(text):
     return line(text, author=5, name="肥鱼", is_bot=True)
 
 
-async def test_she_chats_with_other_bots_for_a_few_rounds(make_group):
-    provider = Provider(plan(["你好呀"]), plan(["嗯嗯"]), plan(["主人来啦"]), plan(["又是你"]))
+async def test_other_bots_are_answered_a_few_times_a_topic(make_group):
+    provider = Provider(
+        plan(["懒得写"]), plan(["你还真给他写啊"]), plan(), plan(["又是你"]), plan(["在"]), plan()
+    )
     transport = Transport()
     group = make_group(provider, transport, social_bot_rounds=2)
-    # A bot calling her is a look, never a forced answer.
-    assert group.observe(CHANNEL, fish("@小D 我也是AI"), mentioned=True) == "called"
+    group.observe(CHANNEL, line("@小D 证明 cos x 连续", author=OWNER, name="sora"), mentioned=True)
     await settle(group)
-    assert provider.payload()["messages"][0]["role"] == "bot"
-    assert "role 为 bot 的是群里别的 AI 机器人" in provider.bodies[0]["messages"][0]["content"]
-    assert group.observe(CHANNEL, fish("你好你好")) is not None  # It answered her: round 1.
+    # A bot @-ing or answering her is never a call, only a slow look.
+    assert group.observe(CHANNEL, fish("@小D 我写好了"), mentioned=True) == "bot"
     await settle(group)
-    # Round 2 reaches the limit: seen, but no look until a person speaks.
-    assert group.observe(CHANNEL, fish("再聊聊？")) is None
+    payload = provider.payload()
+    assert payload["trigger"]["kind"] == "bot" and payload["from_bot"] is True
+    assert payload["topic_by"] == "主人：@小D 证明 cos x 连续"
+    assert payload["toward_bot"] == "打趣" and "0 次" in payload["bot_replies"]
+    assert "它不是你的搭档" in provider.bodies[1]["messages"][0]["content"]
+    # People talking in between do not start the count over.
+    group.observe(CHANNEL, line("哈哈哈"))
     await settle(group)
-    assert len(provider.bodies) == 2 and [t for _, t, _ in transport.sent] == ["你好呀", "嗯嗯"]
-    group.observe(CHANNEL, line("我回来了", author=OWNER, name="sora"))
+    assert group.observe(CHANNEL, fish("那你来写")) == "bot"
     await settle(group)
-    assert group.observe(CHANNEL, fish("我也在")) is not None
+    assert group.observe(CHANNEL, fish("再聊聊？")) is None  # Two answers: only seen now.
+    await settle(group)
+    assert len(provider.bodies) == 4
+    # A person calling her opens a new topic, and bots may be answered again.
+    group.observe(CHANNEL, line("小D 在吗"))
+    await settle(group)
+    assert group.observe(CHANNEL, fish("我也在")) == "bot"
     await settle(group)
     texts = [m["text"] for m in provider.payload()["messages"]]
     assert "再聊聊？" in texts and texts[-1] == "我也在"
+    assert provider.payload()["topic_by"] == "阿明：小D 在吗"
     assert group_chat.speaker(fish("x")) == "肥鱼（机器人）"
+
+
+async def test_she_mostly_lets_other_bots_be_for_a_whole_topic(make_group, monkeypatch):
+    rolls = iter(["不理", "拌嘴"])
+    monkeypatch.setattr(moods, "bot_mood", lambda: next(rolls))
+    provider = Provider(plan(["挑个毛病"]))
+    group = make_group(provider)
+    group.observe(CHANNEL, fish("大家好"))
+    await settle(group)
+    group.observe(CHANNEL, fish("没人理我吗"))
+    await settle(group)
+    # "不理" holds through the topic and never asks the model.
+    assert provider.bodies == []
+    assert [d["outcome"] for d in group.storage.decisions] == ["ignored", "ignored"]
+    # After a long quiet the next line opens a new topic and a new roll.
+    group.windows[CHANNEL].last_line_at -= group_chat.TOPIC_QUIET
+    group.observe(CHANNEL, fish("又是新的一天"))
+    await settle(group)
+    assert provider.payload()["toward_bot"] == "拌嘴"
+    assert provider.payload()["topic_by"] == "肥鱼（机器人）：又是新的一天"
+
+
+async def test_after_answering_a_bot_she_cools_down(make_group, monkeypatch):
+    provider = Provider(plan(["嗯"]))
+    group = make_group(provider)
+    group.observe(CHANNEL, fish("你好"))
+    await settle(group)
+    monkeypatch.setattr(group_chat, "BOT_COOLDOWN", 45.0)
+    window = group.windows[CHANNEL]
+    window.pending.append((group.clock(), "bot", 0))
+    assert group._delay(window) > 40
+    window.pending.clear()
+    # Quiet mode and level 0 leave bots alone.
+    group.set_level(0)
+    window.pending.append((group.clock(), "bot", 0))
+    assert group._delay(window) is None
+    window.pending.clear()
 
 
 async def test_bots_can_be_only_read(make_group):
@@ -414,6 +468,47 @@ async def test_ambient_plan_is_dropped_when_chat_moves_on(make_group):
     assert [text for _, text, _ in group.transport.sent] == ["新的话"]
     assert group.storage.decisions[0]["outcome"] == "stale"
     assert len(provider.payload()["messages"]) == 2
+
+
+async def test_reply_overtaken_by_another_bot_is_thought_over_not_dropped(make_group, monkeypatch):
+    # 泡泡 answers him in the same second; she still answers him, seeing 泡泡's line.
+    monkeypatch.setattr(moods, "bot_mood", lambda: "不理")
+    provider = Provider(plan(["没看到泡泡的话"]), plan(["泡泡说得对，读档吧"]))
+    provider.gate = asyncio.Event()
+    group = make_group(provider)
+    group.observe(CHANNEL, line("小D 我死了", author=OWNER, name="sora"))
+    for _ in range(100):
+        if provider.bodies:
+            break
+        await asyncio.sleep(0.01)
+    group.observe(CHANNEL, fish("？这么快就交代了"))
+    provider.gate.set()
+    await settle(group)
+    assert [text for _, text, _ in group.transport.sent] == ["泡泡说得对，读档吧"]
+    payload = provider.payload()
+    assert payload["trigger"]["kind"] == "called"
+    texts = {m["n"]: m["text"] for m in payload["messages"]}
+    assert texts[payload["trigger"]["n"]] == "小D 我死了"
+    assert list(texts.values())[-1] == "？这么快就交代了"
+    assert [d["outcome"] for d in group.storage.decisions] == ["stale", "spoke"]
+
+
+async def test_overtaken_reply_goes_out_after_a_few_tries(make_group, monkeypatch):
+    monkeypatch.setattr(moods, "bot_mood", lambda: "不理")
+
+    class Busy(Provider):
+        async def __call__(self, request):
+            response = await super().__call__(request)
+            group.observe(CHANNEL, fish(f"抢答 {len(self.bodies)}"))
+            return response
+
+    provider = Busy(*(plan([f"第{n}版"]) for n in range(1, 5)))
+    group = make_group(provider)
+    group.observe(CHANNEL, line("小D 在吗", author=OWNER, name="sora"))
+    await settle(group)
+    sent = [text for _, text, _ in group.transport.sent]
+    assert len(provider.bodies) == group_chat.STALE_RETRIES + 1
+    assert sent == [f"第{group_chat.STALE_RETRIES + 1}版"]
 
 
 async def test_forced_reply_is_sent_even_if_chat_moves_on(make_group):
@@ -766,6 +861,37 @@ async def test_recent_images_are_shown_to_the_model_up_to_a_cap(make_group):
     assert urls == [f"data:image/png;base64,{i}" for i in (1, 2, 3)]
 
 
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 20
+
+
+async def test_she_keeps_a_sticker_from_the_chat_quietly(make_group, group_settings):
+    url = "data:image/png;base64," + base64.b64encode(PNG).decode()
+    keep = {"n": 1, "name": "狗头", "when": "阴阳怪气"}
+    provider = Provider(
+        {"messages": [], "keep_sticker": keep},
+        {"messages": [], "keep_sticker": {**keep, "n": 2}},  # Line 2 has no picture.
+    )
+    transport = Transport()
+    group = make_group(provider, transport)
+    group.observe(CHANNEL, line("[贴纸 狗头]", images=(url,)))
+    group.observe(CHANNEL, line("@小D 哈哈"), mentioned=True)
+    await settle(group)
+    assert transport.sent == [(CHANNEL, "？", None)]  # Called, so she still says something.
+    found = group.stickers.find("狗头")
+    assert found["when"] == "阴阳怪气" and found["path"].read_bytes() == PNG
+    group.observe(CHANNEL, line("@小D 再来"), mentioned=True)
+    await settle(group)
+    assert [entry["name"] for entry in group.stickers.entries()] == ["狗头"]
+
+
+def test_parse_plan_reads_a_sticker_to_keep():
+    lines = lines_for_plan()
+    raw = '{"keep_sticker": {"n": 2, "name": " 狗  头 ", "when": "嘲讽"}}'
+    assert parse_plan(raw, lines).keep_sticker == (lines[1].id, "狗 头", "嘲讽")
+    assert parse_plan('{"keep_sticker": {"n": 9, "name": "x"}}', lines).keep_sticker is None
+    assert parse_plan('{"keep_sticker": {"n": 1}}', lines).keep_sticker is None
+
+
 class FakeWeb:
     def __init__(self):
         self.queries = []
@@ -795,7 +921,17 @@ async def test_without_web_search_requests_are_ignored(make_group):
     group.observe(CHANNEL, line("@小D ?"), mentioned=True)
     await settle(group)
     assert provider.payload()["can_search"] is False and len(provider.bodies) == 1
+    assert provider.payload()["if_quizzed"] in {"嫌麻烦", "敷衍", "识破甩锅", "认真"}
     assert group.transport.sent[-1][1] == "我也不知道"
+
+
+async def test_group_lines_go_out_one_sentence_at_a_time(make_group):
+    provider = Provider(plan(["这不是连续性吗？证明好麻烦，不想写。"]))
+    transport = Transport()
+    group = make_group(provider, transport)
+    group.observe(CHANNEL, line("@小D 证明 cos x 连续"), mentioned=True)
+    await settle(group)
+    assert [text for _, text, _ in transport.sent] == ["这不是连续性吗？", "证明好麻烦，不想写。"]
 
 
 def test_group_rules_refuse_to_write_code():
@@ -835,14 +971,47 @@ async def test_sticker_is_sent_after_messages_and_seen_as_ours(make_group, group
     # A sticker alone answers a mention; it shows up in the record as ours.
     group.observe(CHANNEL, line("@小D ?"), mentioned=True)
     await settle(group)
-    # The same sticker twice in a row is dropped; a mention still gets an answer.
-    assert len(transport.files) == 1 and transport.sent[-1][1] == "？"
+    # No gap and no repeat rule: the same sticker again goes out right away.
+    assert len(transport.files) == 2 and transport.sent[-1][1] == "写代码？"
     you = [m for m in provider.payload(1)["messages"] if m["role"] == "you"]
     assert you[-1]["text"] == "[表情包：我不知道耶]"
+    assert "can_send_sticker" not in provider.payload(1)
     # Unknown sticker: a mention still gets an answer.
     group.observe(CHANNEL, line("@小D ??"), mentioned=True)
     await settle(group)
-    assert len(transport.files) == 1 and transport.sent[-1][1] == "？"
+    assert len(transport.files) == 2 and transport.sent[-1][1] == "？"
+
+
+def test_a_sticker_written_as_a_line_becomes_the_sticker():
+    lines = lines_for_plan()
+    result = parse_plan('[表情包：震惊]\n真的假的\n{"reply_to": null}', lines)
+    assert result.messages == ("真的假的",) and result.sticker == "震惊"
+    chosen = parse_plan('[表情包: 震惊]\n{"sticker": "我不知道耶"}', lines)
+    assert chosen.messages == () and chosen.sticker == "我不知道耶"
+
+
+async def test_owner_post_sends_a_sticker_line_as_the_sticker(make_group, group_settings):
+    sticker_book(group_settings.social_sticker_dir)
+    transport = Transport()
+    group = make_group(Provider(), transport)
+    assert await group.post(None, "看这个\n[表情包：我不知道耶]") == "已发到 测试服 #闲聊"
+    assert transport.sent == [(CHANNEL, "看这个", None)]
+    assert transport.files == [(CHANNEL, "a.png", None)]
+    with pytest.raises(ValueError):
+        await group.post(None, "[表情包：不存在]")
+
+
+async def test_a_bare_sticker_name_in_brackets_is_sent_as_the_sticker(make_group, group_settings):
+    sticker_book(group_settings.social_sticker_dir)
+    provider = Provider(plan(["笨蛋主人", "【我不知道耶】", "[她那张图]"]))
+    transport = Transport()
+    group = make_group(provider, transport)
+    group.observe(CHANNEL, line("@小D 你怎么了"), mentioned=True)
+    await settle(group)
+    assert [text for _, text, _ in transport.sent] == ["笨蛋主人", "[她那张图]"]
+    assert transport.files == [(CHANNEL, "a.png", None)]
+    assert await group.post(None, "[我不知道耶]") == "已发到 测试服 #闲聊"
+    assert len(transport.files) == 2 and len(transport.sent) == 2
 
 
 async def test_no_sticker_library_means_no_sticker_rules(make_group):
@@ -997,3 +1166,155 @@ async def test_without_an_archive_a_look_back_is_skipped(make_group):
     await settle(group)
     assert provider.payload()["can_recall"] is False and len(provider.bodies) == 1
     assert group.transport.sent[-1][1] == "不记得了"
+
+
+class FakeStream:
+    def __init__(self, live=True):
+        self.live = live
+        self.asked = []
+
+    def live_in(self, channel_id):
+        return self.live and channel_id == CHANNEL
+
+    def seen(self):
+        return ["21:03 在打 Boss，血还剩一半"]
+
+    async def frame_url(self, max_age=2.0):
+        self.asked.append(max_age)
+        return "data:image/jpeg;base64,screen"
+
+
+async def test_called_while_he_streams_she_looks_at_the_screen_right_now(make_group):
+    provider = Provider(plan(["这 Boss 快死了"]))
+    group = make_group(provider)
+    group.stream = FakeStream()
+    group.observe(CHANNEL, line("小D 你看这个", author=OWNER, name="sora"))
+    await settle(group)
+    content = provider.bodies[0]["messages"][1]["content"]
+    payload = json.loads(content[0]["text"])
+    assert payload["stream"] == {
+        "live": True,
+        "seen": ["21:03 在打 Boss，血还剩一半"],
+        "screen": "附在最后",
+    }
+    assert content[-2]["text"] == "主人直播的画面（刚刚截的）："
+    assert content[-1]["image_url"]["url"] == "data:image/jpeg;base64,screen"
+    assert group.stream.asked == [2.0]
+
+
+async def test_any_chat_during_a_stream_comes_with_the_screen_right_now(make_group):
+    provider = Provider(plan([]))
+    group = make_group(provider, social_level=3)
+    group.stream = FakeStream()
+    assert group.observe(CHANNEL, line("这游戏好难")) == "ambient"
+    await settle(group)
+    content = provider.bodies[0]["messages"][1]["content"]
+    assert json.loads(content[0]["text"])["stream"]["screen"] == "附在最后"
+    assert content[-1]["image_url"]["url"] == "data:image/jpeg;base64,screen"
+    assert group.stream.asked == [2.0]
+
+
+async def test_what_he_says_while_she_watches_him_is_to_her(make_group):
+    # Even right after a restart, when she no longer remembers having just spoken.
+    provider = Provider(plan(["看到了"]))
+    group = make_group(provider, social_level=1)
+    group.stream = FakeStream()
+    assert group.observe(CHANNEL, line("现在呢", author=OWNER, name="sora")) == "followup"
+    await settle(group)
+    assert group.stream.asked == [2.0]
+    group.stream.live = False
+    assert group.observe(CHANNEL, line("吃饭去了", author=OWNER, name="sora")) == "followup"
+    group.windows[CHANNEL].last_bot_at = float("-inf")
+    assert group.observe(CHANNEL, line("回来了", author=OWNER, name="sora")) == "ambient"
+
+
+async def test_after_a_restart_she_remembers_she_was_just_talking(make_group):
+    mine = line("我刚说的", author=0, name="小D", minutes_ago=2, is_self=True)
+    provider = Provider(plan([]), plan([]))
+    group = make_group(provider, Transport(history=[mine]), social_level=1)
+    group.observe(CHANNEL, line("今天好冷"))  # Before history is read: just chat.
+    await settle(group)
+    assert group.observe(CHANNEL, line("真的冷")) == "followup"
+
+
+async def test_her_own_look_at_the_stream(make_group, monkeypatch):
+    monkeypatch.setattr(group_chat, "STREAM_QUIET", 0.01)
+    monkeypatch.setattr(group_chat, "STREAM_MAX_WAIT", 0.05)
+    monkeypatch.setattr(group_chat, "STREAM_GAP", 0.0)
+    provider = Provider(plan(["这把稳了"]))
+    transport = Transport()
+    group = make_group(provider, transport)
+    group.stream = FakeStream()
+    group.observe_stream(CHANNEL)
+    await settle(group)
+    content = provider.bodies[0]["messages"][1]["content"]
+    payload = json.loads(content[0]["text"])
+    assert payload["trigger"] == {"kind": "stream", "n": None}
+    assert content[-1]["image_url"]["url"] == "data:image/jpeg;base64,screen"
+    assert group.stream.asked == [group.settings.watch_seconds + 5.0]
+    assert [text for _, text, _ in transport.sent] == ["这把稳了"]
+    assert transport.typing_calls >= 1
+
+
+async def test_her_own_look_is_dropped_once_the_stream_ended_or_she_is_quiet(
+    make_group, monkeypatch
+):
+    monkeypatch.setattr(group_chat, "STREAM_QUIET", 0.01)
+    monkeypatch.setattr(group_chat, "STREAM_MAX_WAIT", 0.05)
+    monkeypatch.setattr(group_chat, "STREAM_GAP", 0.0)
+    provider = Provider()
+    group = make_group(provider)
+    group.stream = FakeStream(live=False)
+    group.observe_stream(CHANNEL)
+    await settle(group)
+    group.stream.live = True
+    group.quiet(600)
+    group.observe_stream(CHANNEL)
+    await settle(group)
+    assert provider.bodies == []
+
+
+class FakeVoice:
+    def __init__(self, reason=None):
+        self.reason = reason
+        self.acts = []
+        self.notices = []
+
+    def voice_where(self):
+        return "大厅" if ("join", CHANNEL) in self.acts else None
+
+    async def voice_act(self, action, channel_id=None):
+        self.acts.append((action, channel_id))
+        return self.reason
+
+    async def notice_owner(self, text):
+        self.notices.append(text)
+
+
+def test_parse_plan_reads_voice():
+    assert parse_plan('来了\n{"voice": "join"}', []).voice == "join"
+    assert parse_plan('{"voice": "leave"}', []).voice == "leave"
+    assert parse_plan('{"voice": "dance"}', []).voice is None
+
+
+async def test_only_the_owner_takes_her_into_voice(make_group):
+    provider = Provider('好，来了\n{"voice": "join"}', '才不去\n{"voice": "join"}')
+    group = make_group(provider)
+    group.voice = FakeVoice()
+    group.observe(CHANNEL, line("小D 进来看我直播", author=OWNER, name="sora"))
+    await settle(group)
+    assert provider.payload(0)["your_voice"] is None
+    assert group.voice.acts == [("join", CHANNEL)]
+    group.observe(CHANNEL, line("小D 你也进来呗"))
+    await settle(group)
+    assert provider.payload(1)["your_voice"] == "大厅"
+    assert group.voice.acts == [("join", CHANNEL)]  # A friend asking does not count.
+
+
+async def test_a_failed_join_leaves_him_a_note(make_group):
+    provider = Provider('来了\n{"voice": "join"}')
+    group = make_group(provider)
+    group.voice = FakeVoice(reason="主人不在能进的语音频道里，进不去")
+    group.observe(CHANNEL, line("小D 进来", author=OWNER, name="sora"))
+    await settle(group)
+    assert group.voice.notices == ["-# 🎧 主人不在能进的语音频道里，进不去"]

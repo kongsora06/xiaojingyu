@@ -14,7 +14,7 @@ import httpx2
 import pytest
 from openai import AsyncOpenAI
 
-from discord_dfy import host_agent
+from discord_dfy import host_agent, moods
 from discord_dfy.ai import BASE_URL
 from discord_dfy.config import ConfigurationError, Settings, parse_quiet_hours
 from discord_dfy.conversation_store import ConversationStore
@@ -31,11 +31,13 @@ from discord_dfy.host_agent import (
     transcript,
 )
 from discord_dfy.host_tools import Room, ToolError, describe_call, download_image
+from discord_dfy.images import text_of
 from discord_dfy.initiative import SELF_TAG, Initiative, ago, in_peak, in_quiet_hours
 from discord_dfy.journal import add_entries, day_path, journal_dir
 from discord_dfy.monitor import Renderer
 from discord_dfy.monitor_protocol import Publisher
-from discord_dfy.portrait import STARTING_SELF
+from discord_dfy.pet_touch import PAT, RUB, record, touch_path
+from discord_dfy.portrait import STARTING_NOTE, STARTING_SELF
 from discord_dfy.service import AgentService
 
 OWNER = 20
@@ -130,6 +132,7 @@ async def make_agent(agent_settings, store):
         )
         agent = HostAgent(replace(agent_settings, **overrides), client, store)
         agent.pace = 0  # No typing pauses between texts in tests.
+        agent.settle = 0  # No pause after his message unless a test sets one.
         created.append((agent, client))
         return agent
 
@@ -192,6 +195,7 @@ async def test_she_keeps_notes_quietly_with_a_persons_tools(make_agent, store, a
         "room_list",
         "room_read",
         "room_write",
+        "room_show",
         "save_picture",
         "send_file",
         "view_image",
@@ -199,7 +203,11 @@ async def test_she_keeps_notes_quietly_with_a_persons_tools(make_agent, store, a
     system = first["messages"][0]["content"]
     assert "powershell" not in system and "本机权限" not in system and "技术活不是你的事" in system
     tool_message = second["messages"][-1]
-    assert tool_message == {"role": "tool", "tool_call_id": "call_0", "content": "记好了"}
+    assert tool_message == {
+        "role": "tool",
+        "tool_call_id": "call_0",
+        "content": host_agent.REMEMBERED,
+    }
     memory = agent_settings.agent_memory_path.read_text(encoding="utf-8")
     assert "## 主人\n- 主人周六要去爬山（20" in memory
     # Reasoning goes back within the turn, but is never persisted.
@@ -220,6 +228,49 @@ async def test_history_carries_into_next_message(make_agent):
     assert [m["role"] for m in messages] == ["system", "user", "assistant", "user"]
     assert messages[2]["content"] == "第一次" and "reasoning_content" not in messages[2]
     assert messages[3]["content"].endswith("] 二")
+
+
+def test_cut_run_on_stops_where_she_writes_his_turn():
+    ran_on = (
+        "行行行，那我在外面板着脸走路\n\n不过凶不起来你也得认\n\n"
+        "user[附注] 他要是一本正经考你，你这会儿：敷衍 [附注] 念头\n\n"
+        "[2026-11-05 23:03] 不许讨饶\n\n（这几句本来要发的，还没发出去）\n这个要求"
+    )
+    assert host_agent.cut_run_on(ran_on) == (
+        "行行行，那我在外面板着脸走路\n\n不过凶不起来你也得认",
+        True,
+    )
+    assert host_agent.cut_run_on("好\n\nuser\n[2026-11-05 23:03] 嗯") == ("好", True)
+    assert host_agent.cut_run_on("主人：[附注] x") == ("", True)
+    plain = "我在日记里写了 [附注] 这个词\n他说[2026-11-05 23:03]也行"
+    assert host_agent.cut_run_on(plain) == (plain, False)
+    copied = f"{host_agent.NO_OUTPUT}\n\n那就再说一遍"
+    assert host_agent.cut_run_on(copied) == ("那就再说一遍", True)
+
+
+def test_turns_where_she_said_nothing_are_left_out_of_her_context():
+    history = [
+        {"role": "user", "content": "a"},
+        {"role": "assistant", "content": host_agent.NO_OUTPUT, "reasoning_content": "r"},
+        {"role": "user", "content": [{"type": "text", "text": "b"}]},
+        {"role": "assistant", "content": "c"},
+    ]
+    assert request_messages(history) == [
+        {"role": "user", "content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]},
+        {"role": "assistant", "content": "c"},
+    ]
+    assert request_messages(history[:2] + [{"role": "user", "content": "b"}]) == [
+        {"role": "user", "content": "a\n\nb"}
+    ]
+
+
+async def test_run_on_reply_is_cut_before_sending_and_storing(make_agent, store):
+    provider = Provider(completion("嗯，是你的\n\nuser[附注] 念头\n\n[2026-11-05 23:04] 你也是"))
+    agent = await make_agent(provider)
+    chat = Chat()
+    await say(agent, chat, "你是我的")
+    assert chat.sent == ["嗯，是你的"]
+    assert (await store.load(CHANNEL))[-1]["content"] == "嗯，是你的"
 
 
 async def test_new_starts_fresh_conversation_but_keeps_rows(make_agent, store):
@@ -354,6 +405,33 @@ def test_room_is_hers_and_nothing_outside_it_is_reachable(tmp_path):
     assert "view_image" in room.read("猫.png")
 
 
+async def test_she_decides_what_he_may_open_in_her_room(make_agent, agent_settings):
+    agent = await make_agent(Provider())
+    chat = Chat()
+
+    async def use(name, **arguments):
+        return await agent._run_tool(name, json.dumps(arguments), chat, CHANNEL)
+
+    await use("room_write", path="诗/秋天.md", content="叶子落了")
+    assert await use("room_show", path="诗/秋天.md", note="给你看") == "摆进橱窗了：诗/秋天.md"
+    assert "橱窗里摆着：诗/秋天.md" in await use("room_list")
+    await use("write_diary", text="今天")
+    (diary,) = (agent_settings.agent_room_dir / "diary").iterdir()
+    assert (await use("room_show", path=f"diary/{diary.name}")).startswith("错误：日记不摆橱窗")
+    assert await use("room_show", path="诗/秋天.md", show=False) == "从橱窗收回来了：诗/秋天.md"
+    assert "橱窗" not in await use("room_list")
+    assert "room_show" in host_agent.HOLD_TOOLS  # Her own quick thing: no trail, no report.
+
+
+def test_a_relative_room_shows_kept_pictures_by_their_room_path(tmp_path, monkeypatch):
+    # Production configures the room as data/room, a relative path.
+    monkeypatch.chdir(tmp_path)
+    room = Room(Path("data/room"), Path("data/stickers"))
+    picture = room.keep_picture(PNG, "才没有")
+    assert room.show(picture) == "pictures/才没有.png"
+    assert room.add_sticker(picture, "才没有", "嘴硬") == "才没有"
+
+
 def test_diary_is_dated_and_can_be_read_back(tmp_path):
     room = Room(tmp_path / "room", tmp_path / "stickers")
     assert room.read_diary("", datetime(2026, 10, 26, 9)) == "还没写过日记"
@@ -383,7 +461,15 @@ def test_a_reply_becomes_separate_texts_and_stickers():
     assert texts("[表情包: 我不知道耶]") == [("sticker", "我不知道耶")]
     listing = "要带的：\n\n- 水\n- 伞"
     assert texts(listing) == [("text", listing)]  # Lists stay in one message.
-    assert texts("第一行\n第二行") == [("text", "第一行\n第二行")]
+    # One sentence per message: lines and sentence ends split; commas and kaomoji do not.
+    assert texts("第一行\n第二行") == [("text", "第一行"), ("text", "第二行")]
+    assert texts("好呀。你呢？嘿嘿，我刚吃完 (˶ᵔ ᵕ ᵔ˶)") == [
+        ("text", "好呀。"),
+        ("text", "你呢？"),
+        ("text", "嘿嘿，我刚吃完 (˶ᵔ ᵕ ᵔ˶)"),
+    ]
+    story = "从前有一条小鲸鱼。" * 20  # Long lines are prose and stay whole.
+    assert texts(story) == [("text", story)]
 
 
 async def test_replies_go_out_as_texts_with_stickers(make_agent, agent_settings):
@@ -507,6 +593,55 @@ async def test_discord_routes_owner_dm_with_attachment_links(agent_settings, sto
     assert call["owner_id"] == OWNER and call["channel_id"] == CHANNEL
     assert call["content"] == "看看这个\n[附件 a.png: https://cdn.example/a.png]"
     assert call["chat"].channel is channel
+
+
+async def test_discord_reads_owner_text_files_into_the_dm(agent_settings, storage, policy):
+    bot = DiscordAgent(agent_settings, AgentService(storage, policy))
+    bot._connection.user = SimpleNamespace(id=999)
+    bot.personal = SimpleNamespace(handle_dm=AsyncMock(return_value=True))
+    channel = MagicMock(spec=discord.DMChannel)
+    channel.id = CHANNEL
+    note = SimpleNamespace(
+        filename="笔记.md",
+        url="https://cdn.example/n.md",
+        size=9,
+        read=AsyncMock(return_value="一二三".encode()),
+    )
+    message = SimpleNamespace(
+        guild=None,
+        channel=channel,
+        author=SimpleNamespace(id=OWNER, bot=False),
+        content="看",
+        attachments=[note],
+        webhook_id=None,
+    )
+    await bot.on_message(message)
+    assert (
+        bot.personal.handle_dm.await_args.kwargs["content"] == "看\n[附件 笔记.md 的内容]\n一二三"
+    )
+    message.author = SimpleNamespace(id=OWNER + 1, bot=False)
+    await bot.on_message(message)
+    assert (
+        bot.personal.handle_dm.await_args.kwargs["content"]
+        == "看\n[附件 笔记.md: https://cdn.example/n.md]"
+    )
+
+
+@pytest.fixture(autouse=True)
+def no_mood_roll(monkeypatch):
+    """The quiz mood is a dice roll; most tests look at his words without it."""
+    monkeypatch.setattr(moods, "serious_mood", lambda: "")
+
+
+async def test_each_turn_tells_her_how_she_would_take_a_quiz(make_agent, monkeypatch):
+    monkeypatch.setattr(moods, "serious_mood", lambda: "嫌麻烦")
+    provider = Provider(completion("嗯？"))
+    agent = await make_agent(provider)
+    await say(agent, Chat(), "1+1 等于几")
+    said = provider.bodies[0]["messages"][-1]["content"]
+    assert said.startswith("[附注] 他要是一本正经考你，你这会儿：嫌麻烦\n\n")
+    assert said.endswith("1+1 等于几")
+    assert "他要是一本正经考你" in provider.bodies[0]["messages"][0]["content"]
 
 
 async def test_system_prompt_is_constant_and_messages_carry_time(make_agent):
@@ -894,8 +1029,54 @@ class GroupTransport:
         self.sent.append((channel_id, text))
         return 555
 
+    async def send_file(self, channel_id, path, reply_to=None):
+        self.sent.append((channel_id, path))
+        return 556
+
     def channels(self):
         return [{"id": 100, "channel": "闲聊", "guild_id": 10, "guild": "朋友群"}]
+
+
+async def test_she_sends_a_file_from_her_room_to_the_group(make_agent, agent_settings):
+    from discord_dfy.group_chat import GroupChat
+
+    room = agent_settings.agent_room_dir
+    room.mkdir()
+    (room / "猫.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 32)
+    provider = Provider(
+        completion("", [("send_file", {"path": "猫.png", "to": "群里"})]),
+        completion("发啦"),
+    )
+    agent = await make_agent(provider)
+    transport = GroupTransport()
+    agent.group = GroupChat(agent_settings, agent.client, transport)
+    chat = Chat()
+    await say(agent, chat, "把那张猫发群里")
+    assert transport.sent == [(100, (room / "猫.png").resolve())]
+    assert chat.files == []  # It went to the group, not to him.
+    results = [m["content"] for m in provider.bodies[1]["messages"] if m["role"] == "tool"]
+    assert results == ["已把 猫.png 发到 朋友群 #闲聊"]
+    assert "`send_file` 群里" in chat.sent[0] and chat.sent[-1] == "发啦"
+    # The group side knows it was her.
+    line = agent.group.windows[100].lines[-1]
+    assert line.is_self and line.content == "[发了文件：猫.png]"
+    await agent.group.close()
+
+
+async def test_sending_to_the_group_without_a_group_says_so(make_agent, agent_settings):
+    room = agent_settings.agent_room_dir
+    room.mkdir()
+    (room / "诗.md").write_text("x", encoding="utf-8")
+    provider = Provider(
+        completion("", [("send_file", {"path": "诗.md", "to": "群里"})]),
+        completion("发不了"),
+    )
+    agent = await make_agent(provider)
+    chat = Chat()
+    await say(agent, chat, "发群里")
+    assert chat.files == []
+    results = [m["content"] for m in provider.bodies[1]["messages"] if m["role"] == "tool"]
+    assert results == ["错误：群聊没开，发不到群里"]
 
 
 async def test_owner_can_have_the_bot_speak_in_the_group(make_agent, agent_settings):
@@ -1019,12 +1200,15 @@ async def test_she_hears_him_out_before_answering(make_agent, store):
     chat = Chat()
     await say(agent, chat, "被很多人喜欢，你会更有爱一点吗")
     listen = provider.bodies[0]
-    assert listen["messages"][0]["content"].startswith(host_agent.LISTEN_PROMPT)
+    # The same system prompt as her answer (persona, self, memory; a cached prefix).
+    assert listen["messages"][0] == provider.bodies[1]["messages"][0]
     assert "<self>" in listen["messages"][0]["content"] and "tools" not in listen
     assert listen["thinking"] == {"type": "disabled"}
-    assert "你会更有爱一点吗" in listen["messages"][1]["content"].split("<new>")[1]
+    asked = listen["messages"][1]["content"]
+    assert asked.startswith(host_agent.LISTEN_PROMPT)
+    assert "你会更有爱一点吗" in asked.split("<new>")[1]
     user = provider.bodies[1]["messages"][-1]["content"]
-    assert user.startswith("[附注] 你读到他下面这几句，心里先冒出来的念头：在说喜欢我的人")
+    assert user.startswith(host_agent.LISTEN_NOTE + "在说喜欢我的人")
     assert user.endswith("被很多人喜欢，你会更有爱一点吗")
     assert chat.sent == ["那我大概会被宠坏吧"]
     # The note is not taken for his words when the chat is looked back over.
@@ -1069,12 +1253,32 @@ async def test_owner_images_are_shown_and_kept_as_file_references(make_agent, st
     await asyncio.wait_for(agent.workers[CHANNEL], 30)
     content = provider.bodies[0]["messages"][-1]["content"]
     assert content[0]["type"] == "text" and content[0]["text"].endswith("（发了图片）")
-    assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+    assert content[1] == {"type": "text", "text": "（他发的图：cat.png）"}
+    assert content[2]["image_url"]["url"].startswith("data:image/png;base64,")
     stored = (await store.load(CHANNEL))[0]["content"]
-    assert stored[1] == {"type": "image_file", "path": str(image)}
+    assert stored[2] == {"type": "image_file", "path": str(image)}
     await say(agent, chat, "还有吗")
     # Still shown on later requests (same bytes, so the prefix stays cached).
-    assert provider.bodies[1]["messages"][1]["content"][1] == content[1]
+    assert provider.bodies[1]["messages"][1]["content"][2] == content[2]
+
+
+async def test_she_keeps_a_picture_he_sent_as_a_sticker_by_its_name(make_agent, agent_settings):
+    sent = agent_settings.personal_database_path.parent / "dm_images" / "77-0.png"
+    sent.parent.mkdir(parents=True, exist_ok=True)
+    sent.write_bytes(PNG)
+    keep = {"source": "77-0.png", "name": "叉腰", "sticker": True, "when": "得意"}
+    provider = Provider(
+        completion("", [("save_picture", keep)]),
+        completion("", [("save_picture", {**keep, "name": "又一张"})]),
+        completion("收啦"),
+    )
+    agent = await make_agent(provider)
+    await say(agent, Chat(), "这个表情给你")
+    results = [m["content"] for m in provider.bodies[2]["messages"] if m["role"] == "tool"]
+    assert results[0] == "存好了：pictures/叉腰.png，也加进表情包了（叉腰）"
+    assert results[1].endswith("这张已经在表情包里了，叫「叉腰」")
+    found = agent.stickers.find("叉腰")
+    assert found["when"] == "得意" and found["path"].read_bytes() == PNG
 
 
 async def test_view_image_shows_a_copy_after_the_tool_result(make_agent, agent_settings, store):
@@ -1275,6 +1479,29 @@ async def test_peak_hours_hold_her_back_until_they_end(make_agent):
     assert not await initiative.consider() and len(provider.bodies) == 1
     initiative.now = lambda: datetime(2026, 10, 27, 10, tzinfo=UTC)  # 18:00: peak is over.
     assert await initiative.consider() and sent == ["忙完没"]
+
+
+async def test_him_in_the_group_or_on_stream_means_he_is_around(make_agent, agent_settings):
+    from discord_dfy.group_chat import ChatLine, GroupChat
+
+    provider = Provider(completion("嗯"), completion("打完了？"))
+    agent, initiative, clock, sent = await setup(make_agent, provider)
+    group = agent.group = GroupChat(agent_settings, agent.client, GroupTransport())
+    await say(agent, Chat(), "hi")
+    clock.t += 5 * HOUR
+    group.controls.enabled = False  # Only the note that he spoke matters here.
+    owner = agent_settings.owner_discord_user_id
+    group.observe(100, ChatLine(1, 5, "泡泡", "？", datetime.now(UTC), is_bot=True))
+    assert group.owner_seen_at == 0.0
+    group.observe(100, ChatLine(2, owner, "sora", "我死了", datetime.now(UTC)))
+    assert time.time() - group.owner_seen_at < 5
+    group.owner_seen_at = clock.t - 10 * 60  # He was talking in the group just now.
+    assert not await initiative.consider() and len(provider.bodies) == 1
+    group.owner_seen_at = 0.0
+    group.stream = SimpleNamespace(channel_id=100)  # He is live and she is watching.
+    assert not await initiative.consider() and len(provider.bodies) == 1
+    group.stream.channel_id = None  # Stream over, long quiet: her own time again.
+    assert await initiative.consider() and sent == ["打完了？"]
 
 
 async def test_quiet_hours_and_running_turns_block_reaching_out(make_agent):
@@ -1587,6 +1814,56 @@ async def test_in_a_quiet_spell_she_does_her_own_things(make_agent, agent_settin
     assert not agent.activity
 
 
+async def test_she_hears_he_touched_the_her_on_his_desktop_with_his_next_message(
+    make_agent, agent_settings
+):
+    provider = Provider(completion("早"), completion("嘿嘿"), completion("在呢"))
+    agent = await make_agent(provider)
+    await say(agent, Chat(), "早")
+    first = provider.bodies[0]["messages"]
+    assert "桌宠" in text_of(first[0]["content"])  # She knows what the note will mean.
+    assert "主人在桌面上" not in text_of(first[-1]["content"])  # Nothing touched, nothing said.
+    path = touch_path(agent_settings.personal_database_path.parent)
+    now = datetime.now().astimezone()
+    record(path, PAT, now - timedelta(hours=7))  # Long ago: not brought up now.
+    record(path, RUB, now - timedelta(minutes=3))
+    record(path, PAT, now - timedelta(minutes=1))
+    record(path, PAT, now - timedelta(seconds=50))
+    await say(agent, Chat(), "在干嘛")
+    user = text_of(provider.bodies[1]["messages"][-1]["content"])
+    assert user.startswith("[附注] 主人在桌面上摸了摸你的头、拍了你 2 下（")
+    assert "不是他说的话）\n\n" in user and user.endswith("] 在干嘛")
+    assert not path.exists()
+    # Told once: it stays where it was said and does not come again.
+    await say(agent, Chat(), "嗯？")
+    third = [text_of(m["content"]) for m in provider.bodies[2]["messages"] if m["role"] == "user"]
+    assert "主人在桌面上" not in third[-1]
+    assert sum("主人在桌面上摸了摸你的头" in turn for turn in third) == 1
+
+
+async def test_next_quiet_spell_goes_on_from_her_last_diary(make_agent):
+    provider = Provider(
+        completion("嗯"),
+        completion("", [("write_diary", {"text": "他去上班了，有点无聊"})]),
+        completion("（不找他）"),
+        completion("（不找他）"),
+    )
+    agent, initiative, clock, sent = await setup(make_agent, provider)
+    await say(agent, Chat(), "我去上班了")
+    clock.t += 2 * HOUR
+    assert not await initiative.consider()
+    first = provider.bodies[1]["messages"][-1]["content"]
+    assert "上一篇日记" not in first and "自己做过的事" not in first
+    clock.t += 2 * HOUR
+    assert not await initiative.consider()
+    # He still hasn't come back: she sees what she did last time and what she wrote.
+    second = provider.bodies[3]["messages"][-1]["content"]
+    assert "他不在的这阵子，你自己做过的事：\n你自己待着的时候" in second
+    assert "- 写了日记" in second
+    assert "你上一篇日记是这样写的：\n## " in second and "他去上班了，有点无聊" in second
+    assert "这回不写也没关系" in second
+
+
 async def test_she_lets_him_finish_typing_before_answering(make_agent, monkeypatch):
     monkeypatch.setattr(host_agent, "TYPING_POLL", 0.01)
     provider = Provider(completion("真的假的"))
@@ -1600,6 +1877,106 @@ async def test_she_lets_him_finish_typing_before_answering(make_agent, monkeypat
     user = provider.bodies[0]["messages"][-1]["content"]
     assert "我跟你说" in user and user.endswith("今天中奖了")
     assert chat.sent == ["真的假的"]
+
+
+async def test_she_waits_a_moment_for_typing_that_starts_after_his_message(make_agent, monkeypatch):
+    monkeypatch.setattr(host_agent, "TYPING_POLL", 0.01)
+    provider = Provider(completion("然后呢"))
+    agent = await make_agent(provider)
+    agent.settle = 0.3
+    chat = Chat()
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="我跟你说", chat=chat)
+    await asyncio.sleep(0.1)  # Already working; his "typing" comes a moment later.
+    agent.note_typing(CHANNEL)
+    await asyncio.sleep(0.4)  # Past the settle time, but he is still typing.
+    assert provider.bodies == [] and chat.sent == []
+    await say(agent, chat, "今天被夸了")
+    (body,) = provider.bodies
+    user = body["messages"][-1]["content"]
+    assert "我跟你说" in user and user.endswith("今天被夸了")
+
+
+async def test_typing_during_her_turn_is_heard_before_her_next_look(make_agent, monkeypatch):
+    monkeypatch.setattr(host_agent, "TYPING_POLL", 0.01)
+    bodies = []
+    chat = Chat()
+    responses = [
+        completion("", [("remember", {"text": "主人今天加班", "section": "今天"})]),
+        completion("那今天早点睡"),
+    ]
+
+    async def provider(request):
+        bodies.append(json.loads(request.content))
+        if len(bodies) == 1:
+            agent.note_typing(CHANNEL)  # He starts typing while she is thinking.
+
+            async def more():
+                await asyncio.sleep(0.1)
+                await agent.handle_dm(
+                    owner_id=OWNER, channel_id=CHANNEL, content="而且明天还要早起", chat=chat
+                )
+
+            asyncio.get_running_loop().create_task(more())
+        return httpx2.Response(200, json=responses.pop(0))
+
+    agent = await make_agent(provider)
+    await say(agent, chat, "今天加班到好晚")
+    await asyncio.wait_for(agent.workers.get(CHANNEL) or asyncio.sleep(0), 30)
+    # Her second look already has what he sent while she was busy.
+    roles = [m["role"] for m in bodies[1]["messages"]]
+    assert roles == ["system", "user", "assistant", "tool", "user"]
+    assert bodies[1]["messages"][-1]["content"].endswith("而且明天还要早起")
+    assert chat.sent == ["那今天早点睡"] and len(bodies) == 2
+
+
+async def test_a_ready_reply_waits_while_he_types_more(make_agent, monkeypatch):
+    monkeypatch.setattr(host_agent, "TYPING_POLL", 0.01)
+    bodies = []
+    chat = Chat()
+    responses = [completion("那你好好休息"), completion("早起的话今晚可别熬了")]
+
+    async def provider(request):
+        bodies.append(json.loads(request.content))
+        if len(bodies) == 1:
+            agent.note_typing(CHANNEL)  # He starts typing again while she answers.
+
+            async def more():
+                await asyncio.sleep(0.2)
+                assert chat.sent == []  # Her answer waits for him.
+                await agent.handle_dm(
+                    owner_id=OWNER, channel_id=CHANNEL, content="而且明天还要早起", chat=chat
+                )
+
+            asyncio.get_running_loop().create_task(more())
+        return httpx2.Response(200, json=responses.pop(0))
+
+    agent = await make_agent(provider)
+    await say(agent, chat, "今天加班到好晚")
+    await asyncio.wait_for(agent.workers.get(CHANNEL) or asyncio.sleep(0), 30)
+    # The first answer never went out; she answered both of his messages at once.
+    assert chat.sent == ["早起的话今晚可别熬了"] and len(bodies) == 2
+    roles = [m["role"] for m in bodies[1]["messages"]]
+    assert roles == ["system", "user", "assistant", "user"]
+    unsent = bodies[1]["messages"][2]["content"]
+    assert unsent == f"{host_agent.UNSENT}\n那你好好休息"
+    assert bodies[1]["messages"][-1]["content"].endswith("而且明天还要早起")
+
+
+async def test_a_ready_reply_goes_out_when_he_stops_typing_without_sending(make_agent, monkeypatch):
+    monkeypatch.setattr(host_agent, "TYPING_POLL", 0.01)
+    monkeypatch.setattr(host_agent, "TYPING_SECONDS", 0.2)
+    bodies = []
+    chat = Chat()
+
+    async def provider(request):
+        bodies.append(json.loads(request.content))
+        agent.note_typing(CHANNEL)  # He types a bit, then lets it go.
+        return httpx2.Response(200, json=completion("嗯嗯"))
+
+    agent = await make_agent(provider)
+    await say(agent, chat, "今天加班到好晚")
+    await asyncio.wait_for(agent.workers.get(CHANNEL) or asyncio.sleep(0), 30)
+    assert chat.sent == ["嗯嗯"] and len(bodies) == 1
 
 
 async def test_no_reaching_out_while_he_is_typing(make_agent):
@@ -1664,22 +2041,29 @@ async def test_she_rewrites_her_self_portrait_and_keeps_the_old_one(make_agent, 
     chat = Chat()
     await say(agent, chat, "你觉得你是什么样的人")
     system = provider.bodies[0]["messages"][0]["content"]
-    assert "<self>\n（这是你自己写的你" in system and "（这是起点，你还没自己改过。）" in system
-    assert STARTING_SELF in system and STARTING_SELF
+    # No self.md yet: the starting text is there, said to be the starting text.
+    assert f"<self>\n{STARTING_NOTE}\n{STARTING_SELF}\n</self>" in system
+    assert "这是你自己写的你" not in system and STARTING_SELF
     assert system.index("<self>") < system.index("下面是你在这里的规矩")
     results = [m["content"] for m in provider.bodies[1]["messages"] if m["role"] == "tool"]
-    assert results == ["写好了（下次新对话时生效，群里马上生效）"]
+    assert results == ["写好了（从你下一次回话开始用新的这页，群里马上就用）"]
     path = agent_settings.agent_memory_path.with_name("self.md")
     await say(agent, chat, "再想想")
     results = [m["content"] for m in provider.bodies[3]["messages"] if m["role"] == "tool"]
-    assert results[-2:] == ["写好了（下次新对话时生效，群里马上生效）", "错误：写点什么再存"]
+    assert results[-2:] == [
+        "写好了（从你下一次回话开始用新的这页，群里马上就用）",
+        "错误：写点什么再存",
+    ]
     # First person, and the previous version is kept.
     assert path.read_text(encoding="utf-8") == second.replace("小D", "我") + "\n"
     (old,) = (path.parent / "self-history").iterdir()
     assert old.read_text(encoding="utf-8") == first + "\n"
-    # Frozen within the conversation (cache); the new one comes with the next one.
-    assert provider.bodies[3]["messages"][0] == provider.bodies[0]["messages"][0]
-    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!new", chat=chat)
+    # One turn keeps one version (and its cached prefix), even after a rewrite inside it;
+    # the next turn reads the page again, without waiting for a new conversation.
+    systems = [body["messages"][0]["content"] for body in provider.bodies]
+    assert systems[1] == systems[0]
+    assert "<self>\n（这是你自己写的你" in systems[2] and "喜欢座头鲸" in systems[2]
+    assert systems[3] == systems[2] and "看云" not in systems[3]
     await say(agent, chat, "在吗")
     assert "开始学着好好说话了" in provider.bodies[4]["messages"][0]["content"]
     await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!self", chat=chat)
@@ -1693,7 +2077,8 @@ async def test_she_rewrites_her_self_portrait_and_keeps_the_old_one(make_agent, 
 async def test_remember_puts_todays_things_on_the_days_page(make_agent, agent_settings):
     agent = await make_agent(Provider())
     arguments = {"text": "小D答应陪主人看海", "section": "今天", "important": True}
-    assert await agent._run_tool("remember", json.dumps(arguments), Chat(), CHANNEL) == "记好了"
+    remembered = await agent._run_tool("remember", json.dumps(arguments), Chat(), CHANNEL)
+    assert remembered == host_agent.REMEMBERED and "记好了" not in remembered
     page = day_path(agent_settings.agent_memory_path, datetime.now().date())
     assert "[私聊] ★ 我答应陪主人看海" in page.read_text(encoding="utf-8")
     assert not agent_settings.agent_memory_path.exists()  # The core is for what stays true.
@@ -1792,3 +2177,222 @@ async def test_memory_commands(make_agent, agent_settings):
     )
     await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!journal", chat=chat)
     assert "[群里] 阿栗 发了猫图" in chat.sent[-1]
+
+
+# ---- DSH harness fixes: context, self, replies around remember, compaction ------------
+
+
+async def test_a_first_look_sees_what_she_had_asked_him(make_agent):
+    provider = Provider(
+        completion("他在回我问的下班没，被老板骂了，想让我站他那边"),
+        completion("？老板又发什么疯"),
+    )
+    agent = await make_agent(provider, agent_listen=True)
+    await agent.note_outgoing(CHANNEL, "你下班了吗", "self")
+    await say(agent, Chat(), "刚下班，被老板骂了")
+    listen, answer = provider.bodies
+    asked = listen["messages"][1]["content"]
+    context = asked.split("<context>\n")[1].split("</context>")[0]
+    assert "你下班了吗" in context and "主动找主人说了" in context
+    assert "刚下班，被老板骂了" in asked.split("<new>")[1]
+    assert listen["messages"][0] == answer["messages"][0]
+    user = answer["messages"][-1]["content"]
+    # Her message, then her thought (marked as hers), then his words.
+    assert user.index("你下班了吗") < user.index(host_agent.LISTEN_NOTE) < user.index("刚下班")
+    parts = host_agent.labeled_parts(user)
+    assert [label for label, _ in parts] == [
+        host_agent.MINE_LABEL,
+        host_agent.THOUGHT_LABEL,
+        host_agent.OWNER_LABEL,
+    ]
+    assert parts[0][1] == "你下班了吗" and parts[2][1].endswith("刚下班，被老板骂了")
+
+
+HEX_LOVE = "E6 88 91 E5 96 9C E6 AC A2 E4 BD A0"
+
+
+async def test_b_coded_confession_reaches_both_looks_with_the_chat_so_far(make_agent):
+    assert bytes.fromhex(HEX_LOVE.replace(" ", "")).decode() == "我喜欢你"
+    provider = Provider(
+        completion("他在找我说话"),
+        completion("在想你呀"),
+        completion("他用十六进制偷偷说了什么"),
+        completion("嘿嘿"),
+    )
+    agent = await make_agent(provider, agent_listen=True)
+    chat = Chat()
+    await say(agent, chat, "在干嘛")
+    await say(agent, chat, HEX_LOVE)
+    listen, answer = provider.bodies[2:]
+    asked = listen["messages"][1]["content"]
+    assert HEX_LOVE in asked.split("<new>")[1]
+    recent = asked.split("<recent>")[1].split("</recent>")[0]
+    assert "【主人】" in recent and "在干嘛" in recent and "【我】在想你呀" in recent
+    # Her persona (with what it says about codes and hidden meanings) frames both looks.
+    for body in (listen, answer):
+        assert agent.settings.autonomous_personality in body["messages"][0]["content"]
+    said = answer["messages"][-1]["content"]
+    assert said.startswith(host_agent.LISTEN_NOTE) and said.endswith(HEX_LOVE)
+    assert any("在干嘛" in text_of(m.get("content")) for m in answer["messages"][1:-1])
+
+
+async def test_c_reply_around_remember_arrives_whole(make_agent, agent_settings):
+    chat = Chat()
+    seen_when_asked_again = []
+    responses = [
+        completion(
+            "？老板又发什么疯",
+            [("remember", {"text": "主人今天被老板骂了，我有点心疼", "section": "今天"})],
+            "先记一下",
+        ),
+        completion("抱抱，今晚不想他了"),
+    ]
+    bodies = []
+
+    async def provider(request):
+        bodies.append(json.loads(request.content))
+        if len(bodies) == 2:
+            seen_when_asked_again.append(list(chat.sent))
+        return httpx2.Response(200, json=responses.pop(0))
+
+    agent = await make_agent(provider)
+    await say(agent, chat, "刚下班，被老板骂了")
+    assert seen_when_asked_again == [[]]  # Nothing half-sent while she wrote it down.
+    assert chat.sent == ["？老板又发什么疯", "抱抱，今晚不想他了"]
+    assert [m["role"] for m in bodies[1]["messages"]] == ["system", "user", "assistant", "tool"]
+    assistant, tool = bodies[1]["messages"][2:]
+    assert (
+        assistant["content"] == "？老板又发什么疯" and assistant["reasoning_content"] == "先记一下"
+    )
+    assert assistant["tool_calls"][0]["function"]["name"] == "remember"
+    assert tool["content"] == host_agent.REMEMBERED and "记好了" not in tool["content"]
+    page = day_path(agent_settings.agent_memory_path, datetime.now().date())
+    assert "我有点心疼" in page.read_text(encoding="utf-8")
+
+
+async def test_c_words_before_a_slower_tool_still_go_out_first(make_agent):
+    chat = Chat()
+    seen = []
+    responses = [
+        completion("我去群里说一声", [("group_post", {"text": "主人下班啦"})]),
+        completion("说好了"),
+    ]
+
+    async def provider(request):
+        seen.append(list(chat.sent))
+        return httpx2.Response(200, json=responses.pop(0))
+
+    agent = await make_agent(provider)
+    await say(agent, chat, "帮我跟群里说一声")
+    assert seen[1][0] == "我去群里说一声"  # Not one of her quick tools: sent right away.
+
+
+async def test_d_no_words_around_remember_is_never_silent(make_agent, caplog):
+    provider = Provider(
+        completion("", [("remember", {"text": "主人说了句嗯", "section": "今天"})]),
+        completion(""),
+        completion("好", [("remember", {"text": "主人又说话了", "section": "今天"})]),
+        completion(""),
+    )
+    agent = await make_agent(provider)
+    chat = Chat()
+    with caplog.at_level("WARNING", logger="discord_dfy.host_agent"):
+        await say(agent, chat, "嗯")
+    assert chat.sent == [host_agent.NOTHING_SAID]
+    assert not any("没有输出" in text for text in chat.sent)
+    assert "nothing to send" in caplog.text
+    # Words earlier in the turn are the reply; an empty last step adds no notice.
+    await say(agent, chat, "再说一句")
+    assert chat.sent[-1] == "好" and chat.sent.count(host_agent.NOTHING_SAID) == 1
+
+
+async def test_e_without_self_md_the_starting_text_is_marked_as_such(make_agent):
+    from discord_dfy.portrait import read_self, self_block
+
+    provider = Provider(completion("在"))
+    agent = await make_agent(provider)
+    await say(agent, Chat(), "在吗")
+    assert not agent.self_path.exists()
+    system = provider.bodies[0]["messages"][0]["content"]
+    assert STARTING_NOTE in system and STARTING_SELF in system
+    assert "这是你自己写的你" not in system
+    # The group side builds its page the same way, so both say the same thing.
+    assert self_block(read_self(agent.self_path)) in system
+
+
+async def test_g_compaction_keeps_her_thoughts_apart_from_his_words(make_agent):
+    provider = Provider(
+        completion("他是不是想让我哄哄他"),
+        completion("抱抱"),
+        completion("他还在等我"),
+        completion("- 主人说今天好累"),
+        completion("在呢"),
+    )
+    agent = await make_agent(provider, agent_listen=True)
+    chat = Chat()
+    await say(agent, chat, "今天好累")
+    agent.force_compact.add(CHANNEL)
+    await say(agent, chat, "还在吗")
+    compact = provider.bodies[3]
+    assert compact["messages"][0]["content"] == COMPACT_PROMPT
+    assert "别把你的念头和猜测写成他说的话" in COMPACT_PROMPT
+    old = compact["messages"][1]["content"]
+    assert "【我自己的念头，不是主人说的】他是不是想让我哄哄他" in old
+    assert "【主人】[" in old and "今天好累" in old
+    assert "【主人】[附注]" not in old and "【主人】" + host_agent.LISTEN_NOTE not in old
+    # Only the conversation is summarized; her memory files are not touched.
+    assert not agent.memory_path.exists()
+
+
+async def test_h_image_the_first_look_cannot_see_is_marked_unknown(make_agent, tmp_path):
+    provider = Provider(
+        completion("他发了图，我这边看不到，先问问"),
+        completion("图没加载出来，再发一次？"),
+        completion("是只橘猫在晒太阳"),
+        completion("好可爱"),
+    )
+    agent = await make_agent(provider, agent_listen=True)
+    chat = Chat()
+    gone = tmp_path / "gone.png"
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="", chat=chat, images=[gone])
+    await asyncio.wait_for(agent.workers[CHANNEL], 30)
+    asked = provider.bodies[0]["messages"][1]["content"]
+    assert isinstance(asked, list) and all(block["type"] == "text" for block in asked)
+    texts = [block["text"] for block in asked]
+    assert "（发了图片）" in texts[0] and any(host_agent.UNSEEN_IMAGE in t for t in texts)
+    # When the picture can be read, the first look sees it too.
+    cat = tmp_path / "cat.png"
+    cat.write_bytes(PNG)
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="", chat=chat, images=[cat])
+    await asyncio.wait_for(agent.workers[CHANNEL], 30)
+    shown = provider.bodies[2]["messages"][1]["content"]
+    assert any(block["type"] == "image_url" for block in shown)
+    assert not any(host_agent.UNSEEN_IMAGE in block.get("text", "") for block in shown)
+
+
+class FakeVoice:
+    def __init__(self):
+        self.where = None
+        self.acts = []
+
+    async def voice_act(self, action, channel_id=None):
+        self.acts.append(action)
+        self.where = "大厅" if action == "join" else None
+
+    def voice_where(self):
+        return self.where
+
+
+async def test_voice_commands_from_dm(make_agent):
+    provider = Provider()
+    agent = await make_agent(provider)
+    chat = Chat()
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!voice", chat=chat)
+    assert "没有打开" in chat.sent[-1]
+    agent.voice = FakeVoice()
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!voice join", chat=chat)
+    assert agent.voice.acts == ["join"] and chat.sent[-1] == "在语音「大厅」里"
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!voice leave", chat=chat)
+    assert agent.voice.acts == ["join", "leave"] and chat.sent[-1] == "没在语音里"
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!voice dance", chat=chat)
+    assert "用法" in chat.sent[-1] and provider.bodies == [] and not agent.workers

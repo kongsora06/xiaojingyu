@@ -5,7 +5,15 @@ import pytest
 from openai import AsyncOpenAI
 
 from discord_dfy.ai import BASE_URL
-from discord_dfy.images import data_url, image_type, load_block, read_images, text_of
+from discord_dfy.images import (
+    MAX_TEXT_CHARS,
+    data_url,
+    image_type,
+    load_block,
+    read_images,
+    read_text_attachment,
+    text_of,
+)
 from discord_dfy.web import Web, WebError, format_page, format_results
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 20
@@ -51,6 +59,18 @@ async def test_read_images_skips_non_images_and_fake_images():
         Attachment("fake.png", b"not really"),
     ]
     assert await read_images(message) == [("a.png", PNG)]
+
+
+async def test_text_attachments_read_utf8_and_gbk_and_skip_the_rest():
+    assert (
+        await read_text_attachment(Attachment("a.txt", "你好\r\n".encode(), "text/plain")) == "你好"
+    )
+    assert await read_text_attachment(Attachment("b.MD", "# 标题".encode("gbk"), "")) == "# 标题"
+    assert await read_text_attachment(Attachment("c.txt", b"\x00\x01binary")) is None
+    assert await read_text_attachment(Attachment("d.py", b"print(1)", "text/plain")) is None
+    assert await read_text_attachment(Attachment("e.txt", b"")) is None
+    long = await read_text_attachment(Attachment("f.md", "字".encode() * (MAX_TEXT_CHARS + 5)))
+    assert long.startswith("字" * MAX_TEXT_CHARS) and long.endswith("后面还有 5 字没放进来]")
 
 
 def web_client(handler):
@@ -103,3 +123,18 @@ async def test_web_search_and_fetch_use_deepseek_tools_api():
             await web.search("   ")
     assert requests[0] == ("/v1/tools/search", {"query": "上海 天气", "count": 10})
     assert format_results([]) == "没有搜到结果"
+
+
+async def test_discord_stickers_are_read_as_pictures_but_not_lottie():
+    class Sticker:
+        def __init__(self, name, data):
+            self.name, self.data = name, data
+
+        async def read(self):
+            return self.data
+
+    class Message:
+        attachments = []
+        stickers = [Sticker("dog", PNG), Sticker("anim", b'{"v": "5.5"}')]
+
+    assert await read_images(Message()) == [("dog.png", PNG)]

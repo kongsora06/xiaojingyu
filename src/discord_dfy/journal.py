@@ -25,6 +25,7 @@ from pathlib import Path
 
 from openai import APIError
 
+from .ai import error_kind
 from .memory import (
     MEMORY_SECTIONS,
     MEMORY_TIDY_CHARS,
@@ -55,6 +56,7 @@ CONSOLIDATE_PROMPT = """你是小D。下面是你的长期记忆，
   比如约定、主人特意说给你听的话、你们之间要紧的时刻、关于谁的长久的事。
   当时打了 ★ 但现在看没那么要紧的，不放；没打 ★ 可后来又提起、其实挺要紧的，放。
   长期记忆里已经有的，不用再放。
+  一次嘴硬、催睡、临时玩笑或猜测保留为当时的情境，不升级成长期性格、主人的偏好或今后的相处规则。
 - 别的写成这一周的回忆 summary：按日子说发生了什么，几段话，写具体（谁、什么事），流水账可以省。
 - index 是一行字，让你以后一眼知道这周有过什么，比如“主人考试周、阿栗 生日、换了头像”。
 说到自己写“我”，不写“小D”。
@@ -180,7 +182,7 @@ async def _ask(client, model, system, user, *, json_mode, max_tokens=4096) -> st
                 **({"response_format": {"type": "json_object"}} if json_mode else {}),
             )
     except (TimeoutError, APIError) as error:
-        log.warning("Journal request failed; error_type=%s", type(error).__name__)
+        log.warning("Journal request failed; error_type=%s", error_kind(error))
         return None
     return (response.choices[0].message.content or "").strip() if response.choices else None
 

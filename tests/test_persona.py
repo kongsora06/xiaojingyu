@@ -21,10 +21,10 @@ def test_full_persona_is_default_without_enabling_features():
         {"DISCORD_BOT_TOKEN": "fake", "DEEPSEEK_API_KEY": "fake", "ALLOWED_CHANNEL_IDS": "100"}
     )
     assert settings.autonomous_personality == DEFAULT_PERSONALITY
-    assert DEFAULT_PERSONALITY.startswith("小D｜设定")
-    assert DEFAULT_PERSONALITY.endswith("不预告下一轮，不强行留问题。")
-    # Who she is lives on her own page, not in the fixed persona.
-    assert "傲娇" not in DEFAULT_PERSONALITY and "<self>" in DEFAULT_PERSONALITY
+    # The owner revises this text (v7.1 now); only check the whole page loads.
+    assert DEFAULT_PERSONALITY.startswith("小D｜") and "【行动准则】" in DEFAULT_PERSONALITY
+    # The persona points to her own page for the details of who she is.
+    assert "<self>" in DEFAULT_PERSONALITY
     assert not settings.personal_mode_enabled and settings.social_level == 1
 
 

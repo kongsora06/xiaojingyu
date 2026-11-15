@@ -1,5 +1,6 @@
 """Discord transport only: translate events, acknowledge commands, and deliver messages."""
 
+import asyncio
 import json
 import logging
 import os
@@ -15,7 +16,13 @@ from discord import app_commands
 from .config import Settings
 from .group_chat import ChatLine, GroupChat
 from .host_agent import HostAgent
-from .images import data_url, image_type, is_image_attachment, read_images
+from .images import (
+    data_url,
+    image_type,
+    is_image_attachment,
+    read_images,
+    read_text_attachment,
+)
 from .models import IncomingMessage
 from .profile import Profile
 from .service import AgentService
@@ -23,6 +30,9 @@ from .service import AgentService
 log = logging.getLogger(__name__)
 DENIED = "This bot is available only in approved server test channels."
 NO_MENTIONS = discord.AllowedMentions.none()
+# A voice reconnect (a network blip, Discord moving the call) also shows her out of voice
+# for a moment; only out for longer than this is someone disconnecting her.
+VOICE_GRACE = 15.0
 
 
 def split_reply(text: str, limit: int = 1900) -> list[str]:
@@ -111,7 +121,8 @@ class GroupTransport:
         if channel_id not in self.bot.settings.allowed_channel_ids:
             return None
         channel = self.bot.get_channel(channel_id)
-        if not isinstance(channel, discord.TextChannel | discord.Thread):
+        # A voice channel's built-in text chat counts as a channel too.
+        if not isinstance(channel, discord.TextChannel | discord.Thread | discord.VoiceChannel):
             return None
         return channel
 
@@ -233,6 +244,8 @@ class DiscordAgent(discord.Client):
         intents.dm_typing = settings.personal_mode_enabled
         # The group brain reads the conversation, not only messages that mention it.
         intents.message_content = True
+        # Who is in which voice channel, and whether the owner is streaming his screen.
+        intents.voice_states = settings.watch_stream
         super().__init__(
             intents=intents,
             allowed_mentions=NO_MENTIONS,
@@ -243,6 +256,13 @@ class DiscordAgent(discord.Client):
         self.service = service
         self.group: GroupChat | None = None
         self.personal: HostAgent | None = None
+        # Set by the app when WATCH_STREAM is on (stream_watch.StreamWatch).
+        self.stream = None
+        self.voice_lock = asyncio.Lock()
+        # The voice channel the owner asked her into (kept in voice.json), or None.
+        self.voice_target: int | None = None
+        # Waits out a moment out of voice before taking it as a disconnect.
+        self.voice_drop: asyncio.Task | None = None
         self.restart_requested = False
         self.transport = GroupTransport(self)
         self.profile = Profile(self, settings.personal_database_path.parent / "presence.json")
@@ -269,6 +289,10 @@ class DiscordAgent(discord.Client):
         log.info("Slash commands synchronized")
 
     async def close(self) -> None:
+        if self.voice_drop is not None:
+            self.voice_drop.cancel()
+        if self.stream is not None:
+            await self.stream.close()
         if self.personal is not None:
             await self.personal.close()
         if self.group is not None:
@@ -289,6 +313,164 @@ class DiscordAgent(discord.Client):
             except Exception:
                 log.warning("Could not restore presence")
         await self._announce_restart()
+        # Back into the voice channel he last asked her into (a restart drops voice).
+        await self._restore_voice()
+
+    # ---- voice: in and out only at the owner's word ---------------------------------
+
+    @property
+    def voice_marker(self):
+        return self.settings.personal_database_path.parent / "voice.json"
+
+    def _save_voice_target(self) -> None:
+        try:
+            if self.voice_target is None:
+                self.voice_marker.unlink(missing_ok=True)
+            else:
+                self.voice_marker.parent.mkdir(parents=True, exist_ok=True)
+                self.voice_marker.write_text(json.dumps({"channel_id": self.voice_target}))
+        except OSError:
+            log.warning("Could not save the voice channel")
+
+    def _voice_channel(self, channel_id: int | None) -> discord.VoiceChannel | None:
+        if channel_id not in self.settings.allowed_channel_ids:
+            return None
+        channel = self.get_channel(channel_id)
+        return channel if isinstance(channel, discord.VoiceChannel) else None
+
+    def _owner_voice_channel(self) -> discord.VoiceChannel | None:
+        """The approved voice channel the owner is in right now, if any."""
+        owner = self.settings.owner_discord_user_id
+        for channel_id in sorted(self.settings.allowed_channel_ids):
+            channel = self._voice_channel(channel_id)
+            if channel is not None and owner in channel.voice_states:
+                return channel
+        return None
+
+    def voice_where(self) -> str | None:
+        """The name of the voice channel she is sitting in, or None."""
+        channel = self._voice_channel(self.voice_target)
+        return channel.name if channel is not None else None
+
+    async def voice_act(self, action: str, channel_id: int | None = None) -> str | None:
+        """Join ("join") or leave ("leave") voice because the owner said so.
+
+        Joining picks channel_id when it is an approved voice channel (he asked in its
+        text chat), else the approved voice channel he is in. None means done; otherwise
+        a short reason why not.
+        """
+        if self.stream is None:
+            return "看直播没有打开（WATCH_STREAM）"
+        async with self.voice_lock:
+            if action == "leave":
+                self.voice_target = None
+                self._save_voice_target()
+                self.stream.stop()
+                await self._leave_voice()
+                return None
+            channel = self._voice_channel(channel_id) or self._owner_voice_channel()
+            if channel is None:
+                return "主人不在能进的语音频道里，进不去"
+            reason = await self._connect(channel)
+            if reason is not None:
+                return reason
+            self.voice_target = channel.id
+            self._save_voice_target()
+            self._watch_if_live()
+        return None
+
+    async def _restore_voice(self) -> None:
+        if self.stream is None:
+            return
+        try:
+            target = int(json.loads(self.voice_marker.read_text())["channel_id"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return
+        channel = self._voice_channel(target)
+        if channel is None:
+            return
+        async with self.voice_lock:
+            if await self._connect(channel) is None:
+                self.voice_target = channel.id
+                self._watch_if_live()
+
+    async def _connect(self, channel: discord.VoiceChannel) -> str | None:
+        """Sit in the voice channel (muted and deafened: she only watches)."""
+        current = channel.guild.voice_client
+        if current is not None and getattr(current, "channel", None) == channel:
+            return None
+        permissions = channel.permissions_for(channel.guild.me)
+        if not (permissions.view_channel and permissions.connect):
+            return f"没有进「{channel.name}」的权限"
+        try:
+            if current is not None:
+                await current.disconnect(force=True)
+            await channel.connect(timeout=20.0, self_mute=True, self_deaf=True)
+        except Exception as error:
+            log.warning("Could not join the voice channel; error_type=%s", type(error).__name__)
+            return "连不上语音"
+        return None
+
+    async def _leave_voice(self) -> None:
+        for client in list(self.voice_clients):
+            try:
+                await client.disconnect(force=True)
+            except Exception:
+                log.warning("Could not leave the voice channel")
+
+    def _watch_if_live(self) -> None:
+        """Screenshots only while she is in his voice channel and he shares his screen there."""
+        if self.stream is None:
+            return
+        channel = self._voice_channel(self.voice_target)
+        state = (
+            channel.voice_states.get(self.settings.owner_discord_user_id)
+            if channel is not None
+            else None
+        )
+        if state is not None and state.self_stream:
+            self.stream.start(channel.id)
+        elif self.stream.channel_id is not None:
+            self.stream.stop()
+
+    async def on_voice_state_update(
+        self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState
+    ) -> None:
+        if self.user is not None and member.id == self.user.id:
+            await self._moved(after)
+        elif member.id == self.settings.owner_discord_user_id:
+            self._watch_if_live()
+
+    async def _moved(self, after: discord.VoiceState) -> None:
+        """Someone disconnected her or dragged her elsewhere (not her own join or leave):
+        that stands, as if he had said it."""
+        if self.voice_target is None or self.voice_lock.locked():
+            return
+        channel = getattr(after, "channel", None)
+        if channel is None:
+            # Maybe only a reconnect: she keeps watching while it is waited out.
+            if self.voice_drop is None or self.voice_drop.done():
+                self.voice_drop = asyncio.create_task(self._drop_unless_back())
+            return
+        if channel.id != self.voice_target:
+            self.voice_target = channel.id if self._voice_channel(channel.id) else None
+            if self.voice_target is None:
+                await self._leave_voice()  # Dragged somewhere she may not be.
+        self._save_voice_target()
+        self._watch_if_live()
+
+    async def _drop_unless_back(self) -> None:
+        """Out of voice and not back after VOICE_GRACE: someone disconnected her."""
+        await asyncio.sleep(VOICE_GRACE)
+        if self.voice_target is None or self.voice_lock.locked():
+            return
+        channel = self._voice_channel(self.voice_target)
+        if channel is not None and self.user is not None and self.user.id in channel.voice_states:
+            return  # Only a reconnect: she is back where he put her.
+        log.info("Disconnected from voice by someone")
+        self.voice_target = None
+        self._save_voice_target()
+        self._watch_if_live()
 
     async def message_owner(self, text: str, source: str = "group") -> bool:
         """A private word with the owner (from the group, or reaching out); also kept for
@@ -425,7 +607,10 @@ class DiscordAgent(discord.Client):
 
     async def _save_dm_images(self, message):
         """Keep the owner's DM images on disk; the conversation refers to the files."""
-        if not any(is_image_attachment(a) for a in getattr(message, "attachments", None) or []):
+        attachments = getattr(message, "attachments", None) or []
+        if not any(is_image_attachment(a) for a in attachments) and not getattr(
+            message, "stickers", None
+        ):
             return []
         directory = self.settings.personal_database_path.parent / "dm_images"
         saved = []
@@ -466,11 +651,17 @@ class DiscordAgent(discord.Client):
             ):
                 content = message.content
                 images = []
-                if message.author.id == self.settings.owner_discord_user_id:
+                owner = message.author.id == self.settings.owner_discord_user_id
+                if owner:
                     images = await self._save_dm_images(message)
                 saved = {name for name, _ in images}
+                for sticker in getattr(message, "stickers", None) or []:
+                    content += f" [贴纸 {sticker.name}]"
                 for attachment in getattr(message, "attachments", None) or []:
-                    if attachment.filename not in saved:
+                    text = await read_text_attachment(attachment) if owner else None
+                    if text is not None:
+                        content += f"\n[附件 {attachment.filename} 的内容]\n{text}"
+                    elif attachment.filename not in saved:
                         # The agent can download these itself when it needs them.
                         content += f"\n[附件 {attachment.filename}: {attachment.url}]"
                 await self.personal.handle_dm(

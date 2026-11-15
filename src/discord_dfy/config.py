@@ -42,7 +42,7 @@ class Settings:
     social_history_messages: int = 50
     social_history_minutes: int = 120
     # Rounds she may go back and forth with another bot before a person speaks (0 = none).
-    social_bot_rounds: int = 5
+    social_bot_rounds: int = 3
     social_state_path: Path = Path("data/group_state.json")
     social_sticker_dir: Path = Path("data/stickers")
     personal_mode_enabled: bool = False
@@ -72,6 +72,12 @@ class Settings:
     agent_show_reasoning: bool = False
     monitor_enabled: bool = False
     monitor_directory: Path = Path("data/monitor")
+    # Watching the owner's stream (his main screen) while she sits in his voice channel
+    # (only when he asks her in) and he goes live: a frame this often, her own look this
+    # often (0 = only when called).
+    watch_stream: bool = False
+    watch_seconds: int = 30
+    watch_comment_minutes: int = 5
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Settings:
@@ -172,7 +178,7 @@ class Settings:
             social_reasoning_effort=effort,
             social_history_messages=integer("SOCIAL_HISTORY_MESSAGES", 50, 5, 200),
             social_history_minutes=integer("SOCIAL_HISTORY_MINUTES", 120, 5, 1440),
-            social_bot_rounds=integer("SOCIAL_BOT_ROUNDS", 5, 0, 50),
+            social_bot_rounds=integer("SOCIAL_BOT_ROUNDS", 3, 0, 50),
             social_state_path=Path(state_path),
             social_sticker_dir=Path(
                 env.get("SOCIAL_STICKER_DIR", "data/stickers").strip() or "data/stickers"
@@ -200,6 +206,9 @@ class Settings:
             agent_show_reasoning=boolean("AGENT_SHOW_REASONING", "false"),
             monitor_enabled=boolean("MONITOR_ENABLED", "false"),
             monitor_directory=Path(monitor_directory),
+            watch_stream=boolean("WATCH_STREAM", "false"),
+            watch_seconds=integer("WATCH_SECONDS", 30, 10, 600),
+            watch_comment_minutes=integer("WATCH_COMMENT_MINUTES", 5, 0, 120),
         )
 
 

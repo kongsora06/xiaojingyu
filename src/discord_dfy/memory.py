@@ -12,6 +12,8 @@ from datetime import datetime
 
 from openai import APIError
 
+from .ai import error_kind
+
 log = logging.getLogger(__name__)
 # Never put more than this into a prompt, whatever happens to the file.
 MEMORY_LIMIT_CHARS = 12000
@@ -31,7 +33,8 @@ MEMORY_TIDY_PROMPT = """下面是你（小D）的记忆文件，里面有不少�
 - 明显过时或者被后来的事推翻的删掉；"做事备忘" 一节只合并重复，内容不要改。
 - "主人留下的信" 一节原样保留，一个字都不改。
 - 别丢掉具体的事：谁说了什么、哪天、你当时的感受，这些是记忆的价值所在。
-- "主人" 一节里他吃了什么、几点上下班、几点睡这类流水账，合并成一两条稳定的习惯。
+- "主人" 一节里饮食、作息等流水账，只在反复明确、确实形成稳定习惯时才归纳；一次经历不推成习惯。
+- 保留当时的事实与感受，不把偶然的拒绝、嘴硬、催睡或角色玩笑改成长期性格、偏好或指令。
 - 每条一行 "- "，日期留在条目末尾的括号里。
 - 统一用第一人称：说到自己一律写"我"（把"小D"改成"我"），说到主人就写"主人"。
 只输出整理后的完整文件。"""
@@ -144,7 +147,7 @@ async def tidy_memory(client, model: str, path) -> bool:
                     extra_body={"thinking": {"type": "disabled"}},
                 )
         except (TimeoutError, APIError) as error:
-            log.warning("Memory tidy failed; error_type=%s", type(error).__name__)
+            log.warning("Memory tidy failed; error_type=%s", error_kind(error))
             return False
         content = response.choices[0].message.content if response.choices else ""
         tidied = (content or "").strip()

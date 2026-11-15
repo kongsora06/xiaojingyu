@@ -1,4 +1,5 @@
-"""Images the model can look at: Discord attachments and local files, as data URLs."""
+"""Images the model can look at: Discord attachments and local files, as data URLs.
+Also the owner's .txt/.md attachments, read as text."""
 
 import base64
 import logging
@@ -51,7 +52,58 @@ async def read_images(message) -> list[tuple[str, bytes]]:
             continue
         if image_type(data) is not None:
             found.append((attachment.filename, data))
+    # Discord stickers are pictures too (PNG/APNG/GIF; the animated Lottie kind is not).
+    for sticker in getattr(message, "stickers", None) or []:
+        if len(found) >= MAX_IMAGES_PER_MESSAGE:
+            break
+        try:
+            data = await sticker.read()
+        except Exception:
+            log.warning("Could not download a Discord sticker")
+            continue
+        if (kind := image_type(data)) is not None and len(data) <= MAX_IMAGE_BYTES:
+            found.append((f"{sticker.name}.{kind}", data))
     return found
+
+
+TEXT_SUFFIXES = (".txt", ".md")
+MAX_TEXT_BYTES = 1024 * 1024
+MAX_TEXT_CHARS = 20000
+
+
+def is_text_attachment(attachment) -> bool:
+    name = (getattr(attachment, "filename", None) or "").lower()
+    size = getattr(attachment, "size", 0) or 0
+    return name.endswith(TEXT_SUFFIXES) and 0 < size <= MAX_TEXT_BYTES
+
+
+def decode_text(data: bytes) -> str | None:
+    """A .txt/.md file's text (UTF-8, or GBK as Chinese Windows saves it); None if binary."""
+    if b"\x00" in data:
+        return None
+    for encoding in ("utf-8-sig", "gb18030"):
+        try:
+            return data.decode(encoding).replace("\r\n", "\n")
+        except UnicodeDecodeError:
+            continue
+    return None
+
+
+async def read_text_attachment(attachment) -> str | None:
+    """The text of a .txt/.md attachment, clipped to MAX_TEXT_CHARS; None if unreadable."""
+    if not is_text_attachment(attachment):
+        return None
+    try:
+        text = decode_text(await attachment.read())
+    except Exception:
+        log.warning("Could not download a text attachment")
+        return None
+    if text is None:
+        return None
+    text = text.strip()
+    if len(text) > MAX_TEXT_CHARS:
+        text = text[:MAX_TEXT_CHARS] + f"\n[……后面还有 {len(text) - MAX_TEXT_CHARS} 字没放进来]"
+    return text
 
 
 def file_block(path) -> dict:

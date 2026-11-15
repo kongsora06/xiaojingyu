@@ -1,3 +1,4 @@
+import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -6,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import discord
 import pytest
 
+from discord_dfy import discord_bot
 from discord_dfy.discord_bot import (
     DENIED,
     DiscordAgent,
@@ -304,3 +306,149 @@ async def test_reaching_out_is_delivered_like_her_replies(bot, settings):
     assert chat.channel is channel and sent == text  # Split into texts and stickers there.
     bot.personal.note_outgoing.assert_awaited_once_with(77, text, "self")
     channel.send.assert_not_awaited()
+
+
+def test_voice_states_are_followed_only_when_watching(bot, settings):
+    assert not bot.intents.voice_states
+    watching = DiscordAgent(replace(settings, watch_stream=True), bot.service)
+    assert watching.intents.voice_states
+
+
+async def test_transport_talks_in_a_voice_channels_text_chat(bot):
+    channel = text_channel(permissions())
+    channel.__class__ = discord.VoiceChannel
+    bot.get_channel = MagicMock(return_value=channel)
+    assert await GroupTransport(bot).send(100, "我也在看", None) == 4242
+
+
+def voice_channel(channel_id=100, owner_state=None, name="大厅"):
+    channel = MagicMock(spec=discord.VoiceChannel)
+    channel.id = channel_id
+    channel.name = name
+    channel.voice_states = {20: owner_state} if owner_state is not None else {}
+    channel.guild = SimpleNamespace(me=SimpleNamespace(id=BOT), voice_client=None)
+    channel.permissions_for.return_value = SimpleNamespace(view_channel=True, connect=True)
+
+    async def connect(**kwargs):
+        channel.connect_kwargs = kwargs
+        channel.guild.voice_client = SimpleNamespace(channel=channel)
+
+    channel.connect = AsyncMock(side_effect=connect)
+    return channel
+
+
+class FakeWatch:
+    def __init__(self):
+        self.channel_id = None
+
+    def start(self, channel_id):
+        self.channel_id = channel_id
+
+    def stop(self):
+        self.channel_id = None
+
+
+@pytest.fixture
+def voice_bot(settings, policy, tmp_path):
+    agent = DiscordAgent(
+        replace(
+            settings,
+            watch_stream=True,
+            owner_discord_user_id=20,
+            allowed_channel_ids=frozenset({100, 200}),
+            personal_database_path=tmp_path / "personal.sqlite3",
+        ),
+        AgentService(AsyncMock(), policy),
+    )
+    agent._connection.user = SimpleNamespace(id=BOT)
+    agent.stream = FakeWatch()
+    hall = voice_channel(100)
+    games = voice_channel(200, name="游戏")
+    agent.get_channel = MagicMock(side_effect=lambda cid: {100: hall, 200: games}.get(cid))
+    agent.hall, agent.games = hall, games
+    return agent
+
+
+OWNER_MEMBER = SimpleNamespace(id=20)
+
+
+async def test_going_live_alone_does_not_bring_her_in(voice_bot):
+    voice_bot.hall.voice_states[20] = SimpleNamespace(self_stream=True)
+    await voice_bot.on_voice_state_update(OWNER_MEMBER, None, None)
+    await voice_bot.on_ready()
+    assert voice_bot.stream.channel_id is None and not voice_bot.hall.connect.called
+
+
+async def test_she_joins_his_channel_when_told_and_watches_only_while_he_is_live(voice_bot):
+    voice_bot.games.voice_states[20] = SimpleNamespace(self_stream=False)
+    assert await voice_bot.voice_act("join") is None
+    assert voice_bot.games.connect_kwargs == {
+        "timeout": 20.0,
+        "self_mute": True,
+        "self_deaf": True,
+    }
+    assert voice_bot.voice_where() == "游戏" and voice_bot.stream.channel_id is None
+    assert json.loads(voice_bot.voice_marker.read_text()) == {"channel_id": 200}
+    voice_bot.games.voice_states[20] = SimpleNamespace(self_stream=True)
+    await voice_bot.on_voice_state_update(OWNER_MEMBER, None, None)
+    assert voice_bot.stream.channel_id == 200
+    voice_bot.games.voice_states.pop(20)  # He left: no more screenshots, but she stays.
+    await voice_bot.on_voice_state_update(OWNER_MEMBER, None, None)
+    assert voice_bot.stream.channel_id is None and voice_bot.voice_where() == "游戏"
+
+
+async def test_asked_in_a_voice_chat_she_joins_that_channel(voice_bot):
+    voice_bot.games.voice_states[20] = SimpleNamespace(self_stream=True)
+    assert await voice_bot.voice_act("join", 100) is None
+    assert voice_bot.hall.connect.called and not voice_bot.games.connect.called
+    assert voice_bot.stream.channel_id is None  # He streams elsewhere.
+
+
+async def test_she_cannot_join_when_he_is_not_in_voice_or_she_lacks_permission(voice_bot):
+    assert "不在" in await voice_bot.voice_act("join")
+    voice_bot.hall.permissions_for.return_value = SimpleNamespace(view_channel=True, connect=False)
+    assert "权限" in await voice_bot.voice_act("join", 100)
+    assert voice_bot.voice_target is None and not voice_bot.voice_marker.exists()
+
+
+async def test_she_leaves_when_told_or_when_someone_disconnects_her(voice_bot, monkeypatch):
+    voice_bot.hall.voice_states[20] = SimpleNamespace(self_stream=True)
+    await voice_bot.voice_act("join")
+    assert voice_bot.stream.channel_id == 100
+    voice = SimpleNamespace(channel=voice_bot.hall, disconnect=AsyncMock())
+    voice_bot._connection._voice_clients = {10: voice}
+    assert await voice_bot.voice_act("leave") is None
+    voice.disconnect.assert_awaited_once()
+    assert voice_bot.voice_where() is None and voice_bot.stream.channel_id is None
+    assert not voice_bot.voice_marker.exists()
+
+    voice_bot.hall.guild.voice_client = None
+    await voice_bot.voice_act("join")
+    monkeypatch.setattr(discord_bot, "VOICE_GRACE", 0.01)
+    her = SimpleNamespace(id=BOT)
+    await voice_bot.on_voice_state_update(her, None, SimpleNamespace(channel=None))
+    assert voice_bot.stream.channel_id == 100  # It may be only a reconnect.
+    await voice_bot.voice_drop  # Still out after the grace: someone disconnected her.
+    assert voice_bot.voice_target is None and voice_bot.stream.channel_id is None
+    assert not voice_bot.voice_marker.exists()
+
+
+async def test_a_voice_reconnect_is_not_a_disconnect(voice_bot, monkeypatch):
+    monkeypatch.setattr(discord_bot, "VOICE_GRACE", 0.05)
+    voice_bot.hall.voice_states[20] = SimpleNamespace(self_stream=True)
+    await voice_bot.voice_act("join")
+    her = SimpleNamespace(id=BOT)
+    await voice_bot.on_voice_state_update(her, None, SimpleNamespace(channel=None))
+    voice_bot.hall.voice_states[BOT] = SimpleNamespace(self_stream=False)  # Back in.
+    await voice_bot.on_voice_state_update(her, None, SimpleNamespace(channel=voice_bot.hall))
+    await voice_bot.voice_drop
+    assert voice_bot.voice_where() == "大厅" and voice_bot.stream.channel_id == 100
+    assert json.loads(voice_bot.voice_marker.read_text()) == {"channel_id": 100}
+
+
+async def test_after_a_restart_she_goes_back_where_he_put_her(voice_bot):
+    voice_bot.voice_marker.write_text(json.dumps({"channel_id": 100}))
+    voice_bot.hall.voice_states[20] = SimpleNamespace(self_stream=True)
+    await voice_bot._restore_voice()
+    assert voice_bot.hall.connect.called and voice_bot.voice_where() == "大厅"
+    assert voice_bot.stream.channel_id == 100
