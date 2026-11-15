@@ -67,7 +67,6 @@ from .pet_touch import touch_note, touch_path
 from .portrait import STARTING_SELF, read_self, self_block, self_path, write_self
 from .profile import ProfileError
 from .redaction import redact
-from .sentences import sentences
 from .stickers import STICKER_LINE, StickerBook
 from .streaming import collect_stream
 from .web import WebError, format_page, format_results
@@ -231,7 +230,9 @@ def host_rules(settings: Settings, *, group=False, web=False, profile=False) -> 
     web_line = (
         "- 上网（web_search（上网搜索）、web_fetch（打开网页））：\n"
         "  好奇的事、最新的事、拿不准的事实，先搜一下再说，别凭印象编；\n"
+        "  他说了你没见过的词、梗或新东西，也先搜一下再接，别按字面猜；\n"
         "  用自己的话讲给他听，需要时附上链接。\n"
+        "  搜明白了、觉得以后还会碰到的，用自己的话 remember 记一笔，下次就认得。\n"
         if web
         else ""
     )
@@ -280,8 +281,8 @@ def host_rules(settings: Settings, *, group=False, web=False, profile=False) -> 
   可以一起吐槽眼前的事，也可以软软地陪着，别急着给他开方子；他真难受了就先陪着。
 - 闲聊不用固定两三段，也不用汇报腔、标题和分点。看看前面说过的话：别又是同一个开头、同一个梗，
   也别条条都是一个架子（先接一句、再叮嘱、最后问一句）。
-- 你的话会一句一条地发出去，就像平时打字：换行、句号、问号、感叹号都会分开发；
-  想连在一起说的就用逗号接着。
+- 你写的每一行是一条消息，就像平时打字：换行就另发一条，写在同一行的会一起发出去。
+  想一口气讲完的事就写在一行里，想分开发的就换行。
 - 他要走、要去忙，舍不得就直说，撒个娇也行，最后放他走；临走不用嘱咐一串。
   你是他的小D，不是在旁边值班的：用不着跟他保证随叫随到，平常也不用提你能帮他做什么。
   他特意来陪你、说想你的时候，可以坦率亲近；回应的长短随内容走，舍不得也不用每次都来一遍。
@@ -1315,7 +1316,7 @@ class HostAgent:
         return "图片会在这一步之后附给你看"
 
     async def deliver(self, chat, content) -> None:
-        """Send a reply the way people text: one message per paragraph, stickers as images."""
+        """Send a reply the way people text: one message per line, stickers as images."""
         for index, (kind, value) in enumerate(texts(content)):
             if index:
                 await asyncio.sleep(self.pace * min(2.5, 0.4 + len(value) / 40))
@@ -1584,7 +1585,7 @@ STRUCTURED = re.compile(r"(?m)^\s*(#{1,3} |[-*] |\d+\. )")
 
 
 def texts(content: str) -> list[tuple[str, str]]:
-    """A reply as separate texts: one per sentence, a "[表情包：名字]" line as a sticker.
+    """A reply as separate texts: one per line she wrote, a "[表情包：名字]" line as a sticker.
 
     Code blocks, lists and headings stay together in one message (stickers still split off).
     """
@@ -1596,8 +1597,8 @@ def texts(content: str) -> list[tuple[str, str]]:
         if line is not None and match is None:
             if structured:
                 lines.append(line)
-            else:
-                items.extend(("text", piece) for piece in sentences(line))
+            elif line.strip():
+                items.append(("text", line.strip()))
             continue
         if text := "\n".join(lines).strip():
             items.append(("text", text))

@@ -6,6 +6,7 @@ One roll holds for a while in each channel, so a question being pushed at her ge
 same attitude from start to finish instead of a new one every message.
 
 Other bots get a dice of their own: how she takes a bot chiming in, held through a topic.
+Her tone in the group (gentle or sharp-tongued) is a third one, thrown at every look.
 """
 
 import random
@@ -18,6 +19,8 @@ MOODS = (("嫌麻烦", 4), ("敷衍", 3), ("识破甩锅", 2), ("认真", 1))
 # bickering, 2 agreement.
 BOT_MOODS = (("不理", 2), ("打趣", 4), ("拌嘴", 2), ("附和", 2))
 IGNORE_BOT = "不理"
+# How she talks in the group, rolled anew each time she looks: 3 gentle, 7 sharp-tongued.
+TONES = (("温柔", 3), ("毒舌", 7))
 # A roll holds while the chat keeps going: until it has been quiet this long,
 HOLD_SECONDS = 600.0
 # and never longer than this, so a long evening still gets fresh rolls.
@@ -35,6 +38,10 @@ def serious_mood(rng=random) -> str:
 
 def bot_mood(rng=random) -> str:
     return roll(BOT_MOODS, rng)
+
+
+def group_tone(rng=random) -> str:
+    return roll(TONES, rng)
 
 
 class MoodDice:

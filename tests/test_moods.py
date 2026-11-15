@@ -13,6 +13,13 @@ def test_serious_moods_follow_the_four_three_two_one_odds():
         assert abs(counts[name] / 10000 - weight / 10) < 0.02
 
 
+def test_group_tone_is_three_gentle_to_seven_sharp():
+    rng = random.Random(7)
+    counts = Counter(moods.group_tone(rng) for _ in range(10000))
+    assert abs(counts["温柔"] / 10000 - 0.3) < 0.02
+    assert abs(counts["毒舌"] / 10000 - 0.7) < 0.02
+
+
 def test_a_mood_holds_through_a_chat_then_rolls_again(monkeypatch):
     rolls = iter(["嫌麻烦", "认真", "敷衍"])
     monkeypatch.setattr(moods, "serious_mood", lambda: next(rolls))

@@ -925,13 +925,34 @@ async def test_without_web_search_requests_are_ignored(make_group):
     assert group.transport.sent[-1][1] == "我也不知道"
 
 
-async def test_group_lines_go_out_one_sentence_at_a_time(make_group):
-    provider = Provider(plan(["这不是连续性吗？证明好麻烦，不想写。"]))
+async def test_each_look_rolls_a_tone_and_a_search_keeps_it(make_group, monkeypatch):
+    rolls = iter(["毒舌", "温柔"])
+    monkeypatch.setattr(moods, "group_tone", lambda: next(rolls))
+    provider = Provider(
+        {**plan(), "search": "这把稳了 梗"}, plan(["稳，稳稳地输了"]), plan(["抱抱"])
+    )
+    group = make_group(provider)
+    group.web = FakeWeb()
+    group.observe(CHANNEL, line("@小D 这把稳了"), mentioned=True)
+    await settle(group)
+    # The search in between keeps the roll.
+    assert provider.payload(0)["tone"] == provider.payload(1)["tone"] == "毒舌"
+    group.observe(CHANNEL, line("@小D 输了"), mentioned=True)
+    await settle(group)
+    assert provider.payload()["tone"] == "温柔"
+    assert "tone 是这次开口的口气" in group_chat.GROUP_RULES
+
+
+async def test_group_lines_go_out_one_message_a_line(make_group):
+    provider = Provider(plan(["这不是连续性吗？证明好麻烦，不想写。", "下班"]))
     transport = Transport()
     group = make_group(provider, transport)
     group.observe(CHANNEL, line("@小D 证明 cos x 连续"), mentioned=True)
     await settle(group)
-    assert [text for _, text, _ in transport.sent] == ["这不是连续性吗？", "证明好麻烦，不想写。"]
+    assert [text for _, text, _ in transport.sent] == [
+        "这不是连续性吗？证明好麻烦，不想写。",
+        "下班",
+    ]
 
 
 def test_group_rules_refuse_to_write_code():

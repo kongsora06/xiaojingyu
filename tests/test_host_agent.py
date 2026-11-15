@@ -461,14 +461,11 @@ def test_a_reply_becomes_separate_texts_and_stickers():
     assert texts("[表情包: 我不知道耶]") == [("sticker", "我不知道耶")]
     listing = "要带的：\n\n- 水\n- 伞"
     assert texts(listing) == [("text", listing)]  # Lists stay in one message.
-    # One sentence per message: lines and sentence ends split; commas and kaomoji do not.
+    # One message per line she wrote: only a line break starts a new message.
     assert texts("第一行\n第二行") == [("text", "第一行"), ("text", "第二行")]
-    assert texts("好呀。你呢？嘿嘿，我刚吃完 (˶ᵔ ᵕ ᵔ˶)") == [
-        ("text", "好呀。"),
-        ("text", "你呢？"),
-        ("text", "嘿嘿，我刚吃完 (˶ᵔ ᵕ ᵔ˶)"),
-    ]
-    story = "从前有一条小鲸鱼。" * 20  # Long lines are prose and stay whole.
+    told = "好呀。你呢？嘿嘿，我刚吃完 (˶ᵔ ᵕ ᵔ˶)"
+    assert texts(told) == [("text", told)]
+    story = "从前有一条小鲸鱼。" * 20
     assert texts(story) == [("text", story)]
 
 
