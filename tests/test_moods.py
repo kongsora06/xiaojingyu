@@ -20,6 +20,12 @@ def test_group_tone_is_three_gentle_to_seven_sharp():
     assert abs(counts["毒舌"] / 10000 - 0.7) < 0.02
 
 
+def test_she_joins_an_echo_about_half_the_time():
+    rng = random.Random(7)
+    joined = sum(moods.joins_echo(rng) for _ in range(10000))
+    assert abs(joined / 10000 - moods.ECHO_ODDS) < 0.02
+
+
 def test_a_mood_holds_through_a_chat_then_rolls_again(monkeypatch):
     rolls = iter(["嫌麻烦", "认真", "敷衍"])
     monkeypatch.setattr(moods, "serious_mood", lambda: next(rolls))

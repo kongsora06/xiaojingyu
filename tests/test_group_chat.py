@@ -134,6 +134,8 @@ def fast_timing(monkeypatch):
     monkeypatch.setattr(group_chat, "BOT_COOLDOWN", 0.0)
     # Bots get an answer unless a test rolls "不理" itself.
     monkeypatch.setattr(moods, "bot_mood", lambda: "打趣")
+    # She does not join people repeating a line unless a test rolls it.
+    monkeypatch.setattr(moods, "joins_echo", lambda: False)
 
 
 @pytest.fixture
@@ -842,6 +844,29 @@ def test_parse_plan_reads_private_word():
     assert parse_plan('{"dm_owner": "  "}', []).dm_owner is None
 
 
+def test_a_field_written_as_a_tag_is_never_chat():
+    # What she really wrote once: the search as a tag, no JSON. It was posted as chat.
+    tagged = parse_plan("\n\n<search>不死途</search>", [])
+    assert tagged.search == "不死途" and tagged.messages == ()
+    assert parse_plan('{"search": "不死途"}', []).search == "不死途"
+    assert parse_plan("<recall> 上次的约定 </recall>", []).recall == "上次的约定"
+    mixed = parse_plan('等我一下\n<search>别的词</search>\n{"search": "不死途"}', [])
+    assert mixed.messages == ("等我一下",) and mixed.search == "不死途"  # The JSON wins.
+    assert parse_plan("<reply_to>3</reply_to>", []) == Plan()
+    # An ordinary line with angle brackets is still chat.
+    assert parse_plan("<3 你们", []).messages == ("<3 你们",)
+
+
+async def test_a_search_written_as_a_tag_is_searched_not_posted(make_group):
+    provider = Provider("<search>不死途</search>", plan(["原来是这个意思"]))
+    group = make_group(provider)
+    group.web = FakeWeb()
+    group.observe(CHANNEL, line("@小D 不死途疼"), mentioned=True)
+    await settle(group)
+    assert group.web.queries == ["不死途"]
+    assert [text for _, text, _ in group.transport.sent] == ["原来是这个意思"]
+
+
 async def test_recent_images_are_shown_to_the_model_up_to_a_cap(make_group):
     provider = Provider(plan(["好可爱"]))
     group = make_group(provider)
@@ -923,6 +948,50 @@ async def test_without_web_search_requests_are_ignored(make_group):
     assert provider.payload()["can_search"] is False and len(provider.bodies) == 1
     assert provider.payload()["if_quizzed"] in {"嫌麻烦", "敷衍", "识破甩锅", "认真"}
     assert group.transport.sent[-1][1] == "我也不知道"
+
+
+async def test_she_joins_people_repeating_a_line_once_without_the_model(make_group, monkeypatch):
+    monkeypatch.setattr(moods, "joins_echo", lambda: True)
+    provider = Provider(plan())
+    group = make_group(provider)
+    group.observe(CHANNEL, line("？"))
+    await settle(group)
+    assert len(provider.bodies) == 1 and not group.transport.sent  # One person is no chain.
+    group.observe(CHANNEL, line("？", author=8, name="阿颖"))
+    await settle(group)
+    assert [text for _, text, _ in group.transport.sent] == ["？"]
+    assert len(provider.bodies) == 1 and group.storage.decisions[-1]["outcome"] == "echoed"
+    # A third person keeps it going: she has had her turn, so the model is asked as usual.
+    provider.responses.append(plan())
+    group.observe(CHANNEL, line("？", author=9, name="小周"))
+    await settle(group)
+    assert len(group.transport.sent) == 1 and len(provider.bodies) == 2
+
+
+async def test_only_short_plain_lines_from_different_people_are_repeated(make_group, monkeypatch):
+    monkeypatch.setattr(moods, "joins_echo", lambda: True)
+    provider = Provider(plan(), plan(), plan(), plan(), plan(), plan())
+    group = make_group(provider)
+    for text, second in (
+        ("草", FRIEND),  # The same person twice.
+        ("看这个 https://a.example/x", 8),
+        ("这一句话实在是太长了" * 4, 8),
+    ):
+        group.observe(CHANNEL, line(text))
+        await settle(group)
+        group.observe(CHANNEL, line(text, author=second, name="阿颖"))
+        await settle(group)
+    assert not group.transport.sent and len(provider.bodies) == 6
+
+
+async def test_the_dice_decides_whether_she_joins_in(make_group):
+    provider = Provider(plan(), plan())
+    group = make_group(provider)
+    group.observe(CHANNEL, line("好耶"))
+    await settle(group)
+    group.observe(CHANNEL, line("好耶", author=8, name="阿颖"))
+    await settle(group)
+    assert not group.transport.sent and len(provider.bodies) == 2  # Rolled no: the model looks.
 
 
 async def test_each_look_rolls_a_tone_and_a_search_keeps_it(make_group, monkeypatch):
