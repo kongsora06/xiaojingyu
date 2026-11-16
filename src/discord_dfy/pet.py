@@ -12,12 +12,16 @@ status line she set herself, or the name of a thing she put on show. It reads wh
 monitor reads and writes two small files of its own: its place and size (data/pet.json),
 and each pat and rub (data/pet-touch.jsonl), which she is told about with his next message
 (pet_touch). It never talks to her itself.
+
+The right-click menu also opens the Live Monitor as a window of hers (pet_monitor): the
+same stream dfy-monitor prints in a terminal, so the pet can be the one place to watch her.
 Windows only: a see-through window with soft edges needs UpdateLayeredWindow.
 """
 
 import argparse
 import ctypes
 import json
+import re
 import threading
 import time
 import webbrowser
@@ -27,7 +31,9 @@ from pathlib import Path
 from PIL import Image
 
 from .host_tools import read_showcase
+from .monitor import event_sources, read_environment
 from .pet_body import BUBBLE, Body, Painter, Spring, bubble_picture, cut_out
+from .pet_monitor import Feed, Panel
 from .pet_touch import Touches, touch_path
 from .room_view import DEFAULT_PORT, make_server, view_from_env
 from .widget import lines
@@ -128,6 +134,21 @@ def load_state(path: Path) -> dict:
     return state if isinstance(state, dict) else {}
 
 
+PLACE = re.compile(r"(\d+)x(\d+)\+(-?\d+)\+(-?\d+)")
+
+
+def kept_place(geometry, screens: tuple[int, int, int, int]) -> str | None:
+    """The monitor window's remembered size and place, if its title bar is still on a screen
+    (a second display may have been unplugged since)."""
+    found = PLACE.fullmatch(geometry) if isinstance(geometry, str) else None
+    if not found:
+        return None
+    width, height, x, y = map(int, found.groups())
+    left, top, right, bottom = screens
+    reachable = left - width + 80 <= x <= right - 80 and top <= y <= bottom - 60
+    return geometry if reachable and width >= 200 and height >= 120 else None
+
+
 def unseen(showcase: list[dict], seen: dict) -> list[dict]:
     """What she put out (or put out again) since he last looked."""
     return [item for item in showcase if seen.get(item["path"]) != item["since"]]
@@ -161,7 +182,8 @@ class Rub:
 
 
 class Pet:
-    def __init__(self, view, room_url: str, picture_path: Path, state_path: Path):
+    def __init__(self, view, room_url: str, picture_path: Path, state_path: Path, sources=None):
+        """sources: (event directories, secrets never to show) for the monitor window."""
         import tkinter as tk
 
         self.view, self.room_url = view, room_url
@@ -195,6 +217,17 @@ class Pet:
         self.speed, self.rub, self.opened = 0.0, Rub(), 0.0
         # Written down beside her other data, for her to hear of with his next message.
         self.touches = Touches(touch_path(state_path.parent))
+        # The Live Monitor as a window of hers: open or not, and where, is remembered.
+        directories, secrets = sources or ([], ())
+        if not isinstance(self.state.get("monitor"), dict):
+            self.state["monitor"] = {}
+        self.panel = Panel(
+            root,
+            lambda verbose: Feed(directories, secrets, verbose=verbose),
+            self.state["monitor"],
+            self.save,
+            self.master,
+        )
         self.menu = self.build_menu(tk)
         root.bind("<ButtonPress-1>", self.on_press)
         root.bind("<B1-Motion>", self.on_drag)
@@ -209,6 +242,8 @@ class Pet:
         root.deiconify()
         self.poll()
         self.check_showcase()
+        if self.state["monitor"].get("open"):
+            self.show_monitor()
 
     # ----- where she is -----
 
@@ -231,6 +266,7 @@ class Pet:
 
     def save(self) -> None:
         self.state.update(x=self.feet[0], y=self.feet[1], height=self.height, seen=self.seen)
+        self.panel.keep_place()
         try:
             self.state_path.write_text(json.dumps(self.state, ensure_ascii=False), "utf-8")
         except OSError:
@@ -333,6 +369,27 @@ class Pet:
         title, detail, status = lines(self.live)
         self.say(title, "\n".join(part for part in (detail, status) if part))
 
+    def show_monitor(self) -> None:
+        """Open the monitor window where it was, or beside her the first time."""
+        place = kept_place(self.state["monitor"].get("geometry"), all_screens())
+        if place is None:
+            left, top, right, bottom = work_area()
+            width = min(round(540 * self.dpi), right - left)
+            height = min(round(660 * self.dpi), bottom - top)
+            gap = round(12 * self.dpi)
+            mine = round(self.feet[0] - self.painter.feet[0])
+            x = mine - width - gap  # To her left; to her right if there is no room there.
+            if x < left:
+                x = mine + self.painter.size[0] + gap
+            x = max(left, min(right - width, x))
+            y = max(top, bottom - height - round(48 * self.dpi))
+            place = f"{width}x{height}+{x}+{y}"
+        self.panel.show(place)
+
+    def leave(self) -> None:
+        self.save()  # The monitor window comes back next time if it was open now.
+        self.root.destroy()
+
     def open_room(self) -> None:
         now = time.perf_counter()
         if now - self.opened > 1.0:  # Two quick clicks on her news are one wish, not two tabs.
@@ -364,6 +421,9 @@ class Pet:
         elif self.bubble_text and self.bubble_until is None and now - self.quiet_since > 2.5:
             self.hush()  # She stopped a moment ago; the label has had its time.
         self.was_busy = busy
+        if live and self.panel.open:
+            title, detail, status = lines(live)
+            self.panel.set_status(" · ".join(part for part in (title, detail) if part))
         self.root.after(POLL_MS, self.poll)
 
     def check_showcase(self) -> None:
@@ -401,6 +461,7 @@ class Pet:
     def build_menu(self, tk):
         menu = tk.Menu(self.root, tearoff=False)
         menu.add_command(label="她在干嘛", command=self.tell)
+        menu.add_command(label="看 Monitor", command=self.show_monitor)
         menu.add_command(label="打开她的房间", command=self.open_room)
         menu.add_separator()
         sizes = tk.Menu(menu, tearoff=False)
@@ -412,7 +473,7 @@ class Pet:
         menu.add_command(label="回到右下角", command=self.home)
         menu.add_command(label="换一张图…", command=self.change_picture)
         menu.add_separator()
-        menu.add_command(label="让她回去", command=self.root.destroy)
+        menu.add_command(label="让她回去", command=self.leave)
         return menu
 
     def set_on_top(self) -> None:
@@ -485,7 +546,8 @@ def main():
     except OSError:
         server = None
     try:
-        Pet(view, f"http://127.0.0.1:{args.port}/", picture, data / "pet.json").run()
+        sources = event_sources(read_environment())
+        Pet(view, f"http://127.0.0.1:{args.port}/", picture, data / "pet.json", sources).run()
     finally:
         if server is not None:
             server.shutdown()

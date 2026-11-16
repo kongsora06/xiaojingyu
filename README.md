@@ -118,6 +118,7 @@ src/discord_dfy/
   now.py, widget.py      What she is doing right now; dfy-widget, a corner-of-the-screen window
   pet.py, pet_body.py    dfy-pet: her picture on the desktop, bouncy to the touch (Windows)
   pet_touch.py           Pats and head rubs on the pet, told to her with his next DM
+  pet_monitor.py         The Live Monitor as a window of the pet (same stream as dfy-monitor)
   initiative.py          Reaching out to the owner first
   memory.py              The shared long-term memory: notes, sections, tidying
   journal.py             Day pages, weekly archive, looking back, searching old weeks

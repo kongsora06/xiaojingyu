@@ -16,6 +16,9 @@ bot 会把事件写成 `data/monitor/live-*.jsonl`（已脱敏：配置里的 to
 
 ## 查看
 
+不想开终端的话，桌宠（`dfy-pet`）右键“看 Monitor”是同一份内容的窗口版，见
+[personal.md](personal.md) 的“桌宠”一节。
+
 另开一个终端：
 
 ```powershell

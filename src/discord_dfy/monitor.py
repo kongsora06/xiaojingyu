@@ -586,6 +586,18 @@ class Renderer:
         self.write(f"[观测丢失] {text}（省略 {held} 字符未确认尾部）", "red")
 
 
+def read_environment() -> dict:
+    return {**dotenv_values(Path.cwd() / ".env", interpolate=False), **os.environ}
+
+
+def event_sources(values) -> tuple[list[Path], tuple[str, ...]]:
+    """Where live events are written, and the secrets that must never be shown."""
+    secrets = tuple(values.get(k, "") or "" for k in ("DISCORD_BOT_TOKEN", "DEEPSEEK_API_KEY"))
+    directory = Path(values.get("MONITOR_DIRECTORY") or "data/monitor")
+    lab = Path(values.get("DSH_LAB_PATH") or "../dsh-lab")
+    return [directory, lab / "evidence/monitor"], secrets
+
+
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -610,13 +622,11 @@ def main():
         or not 1 <= args.refresh_rate <= 20
     ):
         parser.error("刷新间隔或显示上限不合法")
-    values = {**dotenv_values(Path.cwd() / ".env", interpolate=False), **os.environ}
-    secrets = tuple(values.get(k, "") or "" for k in ("DISCORD_BOT_TOKEN", "DEEPSEEK_API_KEY"))
-    directory = Path(values.get("MONITOR_DIRECTORY") or "data/monitor")
-    lab = Path(values.get("DSH_LAB_PATH") or "../dsh-lab")
+    values = read_environment()
+    directories, secrets = event_sources(values)
     social_db = Path(values.get("DATABASE_PATH") or "data/bot.sqlite3")
     personal_db = Path(values.get("PERSONAL_DATABASE_PATH") or "data/personal.sqlite3")
-    tail = EventTail([directory, lab / "evidence/monitor"], history=args.history)
+    tail = EventTail(directories, history=args.history)
     renderer = Renderer(
         sys.stdout,
         secrets=secrets,
