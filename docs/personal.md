@@ -221,7 +221,11 @@ uv run dfy-monitor            # --verbose 另显示任务/模型状态
 
 ## 人设：起点加成长
 
-`src/discord_dfy/persona.md` 是不变的那页：她叫小D，sora 是她的主人，怎么接话、怎么说话、怎么说真话。她长成什么样由她自己写：
+`src/discord_dfy/persona.md` 是不变的那页：她叫什么、谁是她的主人、怎么接话、怎么说话、怎么说真话。她长成什么样由她自己写。
+
+仓库里的 `persona.md` 和 `self_start.md` 只是占位文件。你自己写的人设放在同一目录下的
+`persona.local.md` 和 `self_start.local.md`（`.gitignore` 里的 `*.local.md` 把它们排除了，不会被提交），
+有就用它，没有才用占位的那页。旧版本的人设稿放在 `docs/persona-*.md`、`docs/archive/persona-*.md`，同样不提交。
 
 - `data/self.md`（`<self>`）：她自己写的“我是个什么样的人”——脾气、性子、喜好、跟主人怎么相处，
   她是什么样的都以这一页为准。`persona.md` 只留不变的部分（名字、谁是主人、怎么说话、说真话）；

@@ -1,11 +1,35 @@
-"""Shared operator-authored persona and content-free, host-authored identity metadata."""
+"""Shared operator-authored persona and content-free, host-authored identity metadata.
+
+The owner's own pages are private and never committed: persona.local.md and
+self_start.local.md, beside the placeholders persona.md and self_start.md that the
+repository carries. Where a private page exists it is the one used.
+"""
 
 import json
+import re
 from importlib.resources import files
+from pathlib import Path
 
-DEFAULT_PERSONALITY = (
-    files("discord_dfy").joinpath("persona.md").read_text(encoding="utf-8").strip()
-)
+# A note to the reader at the very top of a page (the placeholders have one) is not hers.
+LEADING_NOTE = re.compile(r"\A\s*<!--.*?-->", re.S)
+
+
+def own_page(name: str, folder=None) -> str:
+    """The text of a page: the private `<name>.local.md` if it is there, else the placeholder."""
+    folder = files("discord_dfy") if folder is None else Path(folder)
+    stem, _, suffix = name.rpartition(".")
+    for candidate in (f"{stem}.local.{suffix}", name):
+        try:
+            text = folder.joinpath(candidate).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        text = LEADING_NOTE.sub("", text).strip()
+        if text:
+            return text
+    raise FileNotFoundError(f"{name} is missing from {folder}")
+
+
+DEFAULT_PERSONALITY = own_page("persona.md")
 IDENTITY_RULES = """
 回复默认说中文，随对方使用的语言调整，专有名词保留原样。
 思考过程（reasoning）也始终用中文，哪怕正在看英文网页或资料，也不要切换成英文思考。

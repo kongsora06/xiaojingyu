@@ -28,3 +28,8 @@ data/
 .coverage
 htmlcov/
 *.reasoning.json
+
+# The owner's own prompts: private, never committed (placeholders stay in the repo)
+*.local.md
+docs/persona-*.md
+docs/archive/persona-*.md

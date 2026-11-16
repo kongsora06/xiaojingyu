@@ -1,6 +1,7 @@
 import asyncio
 import io
 import json
+import re
 import time
 from contextlib import nullcontext
 from dataclasses import replace
@@ -16,7 +17,7 @@ from openai import AsyncOpenAI
 
 from discord_dfy import host_agent, moods
 from discord_dfy.ai import BASE_URL
-from discord_dfy.config import ConfigurationError, Settings, parse_quiet_hours
+from discord_dfy.config import ConfigurationError, Settings, parse_quiet_hours, peak_hours_here
 from discord_dfy.conversation_store import ConversationStore
 from discord_dfy.discord_bot import DiscordAgent
 from discord_dfy.host_agent import (
@@ -2090,9 +2091,13 @@ async def test_recall_finds_old_chats_word_for_word(make_agent):
 
 def test_her_rules_say_when_she_can_reach_out(agent_settings):
     rules = replace(agent_settings, agent_initiative=True, agent_quiet_hours="")
-    text = host_agent.reach_rules(rules, datetime(2026, 10, 28, 12, tzinfo=UTC))
+    now = datetime(2026, 10, 28, 12, tzinfo=UTC)
+    text = host_agent.reach_rules(rules, now)
     assert f"安静 {rules.agent_initiative_idle_minutes} 分钟以上" in text
-    assert "他那边大约是 " in text and "也不行" not in text
+    # The hours are worked out on the clock of the computer she runs on, wherever that is.
+    here = peak_hours_here(now)
+    assert re.fullmatch(r"\d\d:00-\d\d:00、\d\d:00-\d\d:00", here)
+    assert f"他那边大约是 {here}" in text and "也不行" not in text
     assert "也不行" in host_agent.reach_rules(replace(rules, agent_quiet_hours="03:00-11:00"))
     assert host_agent.reach_rules(replace(rules, agent_initiative=False)) == ""
 

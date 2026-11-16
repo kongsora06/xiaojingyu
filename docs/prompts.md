@@ -5,7 +5,7 @@
 顺序是：persona.md → `<self>` → “下面是你在这里的规矩” + 私聊规矩 → 认人规矩 + trusted_context → `<memory>` → `<journal>` → `<stickers>`。
 
 ### 1. persona.md（你写的）
-`src/discord_dfy/persona.md`，原文不在这里重复。
+`src/discord_dfy/persona.local.md`（私有，不提交；仓库里的 `persona.md` 只是占位），原文不在这里重复。
 
 ### 2. <self> 的外壳
 她写过自己那页时：

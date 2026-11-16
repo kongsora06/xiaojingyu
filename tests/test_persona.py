@@ -2,14 +2,17 @@
 
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 
 import httpx2
+import pytest
 from openai import AsyncOpenAI
 
+import discord_dfy
 from discord_dfy.ai import BASE_URL
 from discord_dfy.config import Settings
 from discord_dfy.group_chat import ChatLine, GroupChat
-from discord_dfy.persona import DEFAULT_PERSONALITY, personal_identity, system_prompt
+from discord_dfy.persona import DEFAULT_PERSONALITY, own_page, personal_identity, system_prompt
 
 
 def identity(prompt):
@@ -21,12 +24,33 @@ def test_full_persona_is_default_without_enabling_features():
         {"DISCORD_BOT_TOKEN": "fake", "DEEPSEEK_API_KEY": "fake", "ALLOWED_CHANNEL_IDS": "100"}
     )
     assert settings.autonomous_personality == DEFAULT_PERSONALITY
-    # The owner revises this text (v9 now, the one she trimmed herself; older ones are in
-    # docs/archive); only check the whole page loads, from its title to its last section.
-    assert "小D｜" in DEFAULT_PERSONALITY.splitlines()[0] and "## 坦诚" in DEFAULT_PERSONALITY
-    # The persona points to her own page for the details of who she is.
-    assert "<self>" in DEFAULT_PERSONALITY
+    # What the page says is the owner's (his private persona.local.md, or the placeholder
+    # in the repository): only check that a whole page loaded, without a note to the reader.
+    assert len(DEFAULT_PERSONALITY) > 50 and "<!--" not in DEFAULT_PERSONALITY
     assert not settings.personal_mode_enabled and settings.social_level == 1
+
+
+def test_the_owners_private_page_is_used_where_there_is_one(tmp_path):
+    (tmp_path / "persona.md").write_text(
+        "<!--\n占位文件，这段不发给模型。\n-->\n# 占位人设\n\n说话自然。\n", encoding="utf-8"
+    )
+    assert own_page("persona.md", tmp_path) == "# 占位人设\n\n说话自然。"  # A fresh clone.
+    (tmp_path / "persona.local.md").write_text("  \n", encoding="utf-8")
+    assert own_page("persona.md", tmp_path).startswith("# 占位人设")  # An empty one is none.
+    (tmp_path / "persona.local.md").write_text(
+        "# 我写的人设\n\n<!-- 中间的注释是他的 -->\n", encoding="utf-8"
+    )
+    assert own_page("persona.md", tmp_path) == "# 我写的人设\n\n<!-- 中间的注释是他的 -->"
+    with pytest.raises(FileNotFoundError):
+        own_page("self_start.md", tmp_path)
+
+
+def test_the_repository_carries_placeholders_and_never_the_private_pages():
+    package = Path(discord_dfy.__file__).parent
+    for name in ("persona.md", "self_start.md"):
+        assert (package / name).read_text(encoding="utf-8").startswith("<!--\n占位文件。")
+    ignored = (package.parents[1] / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert "*.local.md" in ignored
 
 
 def test_system_prompt_layers_persona_rules_and_identity():

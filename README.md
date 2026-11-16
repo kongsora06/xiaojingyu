@@ -25,7 +25,9 @@ places:
 Both sides share the fixed part of her persona in [`persona.md`](src/discord_dfy/persona.md) (name,
 relationship, how she talks), her self-portrait `data/self.md` (who she is, which she rewrites
 herself; [`self_start.md`](src/discord_dfy/self_start.md) until she does) and one
-long-term memory file (`data/memory.md`) that she keeps growing herself. Private DM talk is not
+long-term memory file (`data/memory.md`) that she keeps growing herself. The two pages in the
+repository are placeholders: write your own as `persona.local.md` and `self_start.local.md`
+beside them (git-ignored) and those are used instead. Private DM talk is not
 handed to the group side. The optional [Live Monitor](docs/monitor.md) shows her thinking,
 decisions and tool calls as they stream.
 
