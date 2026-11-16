@@ -442,12 +442,34 @@ async def test_disabled_group_ignores_everything_but_keeps_context(make_group, g
     assert len(provider.payload()["messages"]) == 2
 
 
+async def test_with_the_dice_off_she_is_told_no_roll_and_no_bot_is_ignored(make_group, monkeypatch):
+    monkeypatch.setattr(moods, "bot_mood", lambda: moods.IGNORE_BOT)
+    provider = Provider(plan(["在"]), plan(), plan(["在"]))
+    group = make_group(provider)
+    group.set_dice(False)
+    assert "骰子关着" in group.status()
+    group.observe(CHANNEL, line("@小D 在吗"), mentioned=True)
+    await settle(group)
+    assert not {"if_quizzed", "tone"} & set(provider.payload())
+    # Another bot talking still reaches her; she decides by herself what to make of it.
+    group.observe(CHANNEL, fish("大家好"))
+    await settle(group)
+    payload = provider.payload()
+    assert payload["from_bot"] and "toward_bot" not in payload
+    group.set_dice(True)
+    assert "骰子开着" in group.status()
+    group.observe(CHANNEL, line("@小D 还在吗"), mentioned=True)
+    await settle(group)
+    assert {"if_quizzed", "tone"} <= set(provider.payload())
+
+
 async def test_controls_persist_across_restarts(make_group, group_settings):
     group = make_group(Provider())
     group.set_level(3)
     group.quiet(120)
+    group.set_dice(False)
     restored = Controls.load(group_settings.social_state_path, 1)
-    assert restored.level == 3 and restored.quiet_until > 0
+    assert restored.level == 3 and restored.quiet_until > 0 and not restored.dice
     group.quiet(0)
     assert Controls.load(group_settings.social_state_path, 1).quiet_until == 0
     (group_settings.social_state_path).write_text("not json", encoding="utf-8")
@@ -994,22 +1016,34 @@ async def test_the_dice_decides_whether_she_joins_in(make_group):
     assert not group.transport.sent and len(provider.bodies) == 2  # Rolled no: the model looks.
 
 
-async def test_each_look_rolls_a_tone_and_a_search_keeps_it(make_group, monkeypatch):
-    rolls = iter(["毒舌", "温柔"])
+async def test_her_tone_holds_through_a_chat_and_rolls_again_after_a_quiet_spell(
+    make_group, monkeypatch
+):
+    rolls = iter(["抽象", "温柔"])
     monkeypatch.setattr(moods, "group_tone", lambda: next(rolls))
     provider = Provider(
-        {**plan(), "search": "这把稳了 梗"}, plan(["稳，稳稳地输了"]), plan(["抱抱"])
+        {**plan(), "search": "这把稳了 梗"},
+        plan(["稳，稳得像没开过"]),
+        plan(["星期八"]),
+        plan(["抱抱"]),
     )
     group = make_group(provider)
     group.web = FakeWeb()
+    now = [0.0]
+    group.tones.clock = lambda: now[0]
     group.observe(CHANNEL, line("@小D 这把稳了"), mentioned=True)
     await settle(group)
-    # The search in between keeps the roll.
-    assert provider.payload(0)["tone"] == provider.payload(1)["tone"] == "毒舌"
+    now[0] = moods.HOLD_SECONDS - 1
+    group.observe(CHANNEL, line("@小D 今天星期几"), mentioned=True)
+    await settle(group)
+    # One voice while the chat goes on: across a search and across her looks.
+    assert [provider.payload(i)["tone"] for i in range(3)] == ["抽象"] * 3
+    now[0] += moods.HOLD_SECONDS
     group.observe(CHANNEL, line("@小D 输了"), mentioned=True)
     await settle(group)
     assert provider.payload()["tone"] == "温柔"
-    assert "tone 是这次开口的口气" in group_chat.GROUP_RULES
+    assert "tone 是你这阵子在这个群里的口气" in group_chat.GROUP_RULES
+    assert "对主人（role 为 owner）不生效" in group_chat.GROUP_RULES
 
 
 async def test_group_lines_go_out_one_message_a_line(make_group):
@@ -1408,3 +1442,98 @@ async def test_a_failed_join_leaves_him_a_note(make_group):
     group.observe(CHANNEL, line("小D 进来", author=OWNER, name="sora"))
     await settle(group)
     assert group.voice.notices == ["-# 🎧 主人不在能进的语音频道里，进不去"]
+
+
+async def test_she_is_shown_the_latest_of_the_dm_and_told_to_judge_what_to_say(make_group):
+    asked = []
+
+    async def dm_recent(limit):
+        asked.append(limit)
+        return [
+            {"time": "11-15 21:00", "who": "主人", "text": "少用颜文字 sk-abcdefghijklmnop"},
+            {"time": "11-15 21:00", "who": "你", "text": "好"},
+        ]
+
+    provider = Provider(plan(["在"]), plan(["在"]), plan(["在"]))
+    group = make_group(provider, social_dm_messages=7)
+    group.dm_recent = dm_recent
+    group.observe(CHANNEL, line("@小D 在吗"), mentioned=True)
+    await settle(group)
+    # In the payload, not the system prompt: the cached prefix stays the same.
+    system = provider.bodies[-1]["messages"][0]["content"]
+    assert asked == [7] and "少用颜文字" not in system
+    said = provider.payload()["dm_recent"]
+    assert [entry["who"] for entry in said] == ["主人", "你"]
+    assert said[0]["text"] == "少用颜文字 [REDACTED]"
+    assert "dm_recent" in system and "拿不准的就当不能说" in system
+
+    # A DM side that cannot be read is no reason to stay silent in the group.
+    async def broken(limit):
+        raise RuntimeError("closed")
+
+    group.dm_recent = broken
+    group.observe(CHANNEL, line("@小D 还在吗"), mentioned=True)
+    await settle(group)
+    assert "dm_recent" not in provider.payload()
+
+
+async def test_the_dm_is_not_shown_when_turned_off_or_empty(make_group):
+    asked = []
+
+    async def dm_recent(limit):
+        asked.append(limit)
+        return []
+
+    provider = Provider(plan(["在"]), plan(["在"]))
+    group = make_group(provider, social_dm_messages=0)
+    group.dm_recent = dm_recent
+    group.observe(CHANNEL, line("@小D 在吗"), mentioned=True)
+    await settle(group)
+    assert not asked and "dm_recent" not in provider.payload()
+    # Asked, and nothing said there lately: the field is left out.
+    group = make_group(provider)
+    group.dm_recent = dm_recent
+    group.observe(CHANNEL, line("@小D 在吗"), mentioned=True)
+    await settle(group)
+    assert asked == [20] and "dm_recent" not in provider.payload()
+
+
+async def test_monitor_shows_the_dm_lines_she_was_given_as_notes(make_group):
+    answer = json.dumps(plan(["在"]), ensure_ascii=False)
+    said = [{"time": "11-15 21:00", "who": "主人", "text": "少用颜文字"}]
+
+    async def dm_recent(limit):
+        return list(said)
+
+    async def provider(request):
+        return sse(delta(content=answer))
+
+    def notes():
+        events, group.observer.sink.events = group.observer.sink.events, []
+        return [
+            e["data"]["text"]
+            for e in events
+            if e["type"] == "task-status" and e["data"].get("name") == "note"
+        ]
+
+    group = make_group(provider)
+    group.observer = Observer()
+    group.dm_recent = dm_recent
+    group.observe(CHANNEL, line("@小D 在吗"), mentioned=True)
+    await settle(group)
+    assert notes() == ["带给她最近 1 条私聊，新的 1 条：\n11-15 21:00 主人：少用颜文字"]
+    # The next look repeats nothing; only what was said since is spelled out.
+    group.observe(CHANNEL, line("@小D 还在吗"), mentioned=True)
+    await settle(group)
+    assert notes() == ["带给她最近 1 条私聊（没有新的）"]
+    said.append({"time": "11-15 21:01", "who": "你", "text": "好"})
+    group.observe(CHANNEL, line("@小D 人呢"), mentioned=True)
+    await settle(group)
+    assert notes() == ["带给她最近 2 条私聊，新的 1 条：\n11-15 21:01 小D：好"]
+    # A long catch-up is split, so no line is lost to the size of one monitor event.
+    group.dm_shown = None
+    long = [{"time": "11-15 22:00", "who": "主人", "text": "长" * 600} for _ in range(5)]
+    parts = group._dm_notes(long)
+    assert len(parts) > 1 and all(len(part) < 2048 for part in parts)
+    assert sum(part.count("主人：") for part in parts) == 5
+    assert group._dm_notes(None) == []

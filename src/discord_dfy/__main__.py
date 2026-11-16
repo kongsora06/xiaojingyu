@@ -113,6 +113,8 @@ async def run(settings: Settings) -> bool:
                             personal.voice = bot
                         # Never double-text: a DM to the owner waits while one is unanswered.
                         group.owner_waiting = lambda: any(personal.outgoing.values())
+                        # One her in two places: the group side reads the latest of the DM.
+                        group.dm_recent = personal.recent_dm
                         initiative = Initiative(
                             personal, lambda text: bot.message_owner(text, source="self")
                         )

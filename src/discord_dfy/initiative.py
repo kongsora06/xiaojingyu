@@ -10,6 +10,13 @@ running, and only after the gap since they last talked (AGENT_INITIATIVE_IDLE_MI
 Each message of hers he hasn't answered yet doubles that gap, so she may text again but
 won't keep texting all night while he sleeps. A daily cap is optional. What she sends
 reaches the DM conversation the same way as group-side DMs: with the owner's next message.
+
+Free time is the other way round: he leaves her a stretch on purpose (!play, or telling
+her to go and play, which she takes with go_play). Until it runs out she looks around in
+rounds, one after another, each a spell of its own that begins with the note she left
+herself at the end of the last. The waiting and the hours above do not hold her back
+then; they only ever limited when she may be given time, and here he gave it. She does
+not message him during it: when it is over, the next ordinary look decides that.
 """
 
 import asyncio
@@ -20,7 +27,7 @@ import re
 import time
 import uuid
 from contextlib import nullcontext
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from openai import APIError
 
@@ -38,6 +45,21 @@ MAX_GAP_SECONDS = 8 * 3600
 WEEKDAYS = "一二三四五六日"
 # Tool steps she may take on her own in one quiet spell.
 IDLE_STEPS = 15
+# Free time he left her: she starts once the chat has been quiet this long, and rests
+# this long between rounds (and before trying again while he is still around).
+PLAY_QUIET_SECONDS = 180
+PLAY_REST_SECONDS = 60
+PLAY_DEFAULT_MINUTES = 60
+PLAY_MIN_MINUTES = 5
+# How often in a day she may start it herself (go_play); his own !play is not counted.
+SELF_GRANTS_PER_DAY = 3
+# The note she leaves herself between rounds, and how much of her latest finds she sees again.
+CARRY_CHARS = 600
+FINDS_PEEK = 800
+# Her last reply in a round when she has had enough for today.
+DONE = "（逛够了）"
+DONE_MARK = re.compile(r"[（(]\s*逛够了\s*[)）]")
+LOOKING = {"web_search", "web_fetch"}
 # Her last reply when she does not want to message him.
 SKIP = "（不找他）"
 SKIP_MARK = re.compile(r"[（(]\s*不找他\s*[)）]")
@@ -54,7 +76,8 @@ NUDGE = """[提示] 这不是主人发的消息。现在是 {now}（周{weekday}
 这会儿正好上网搜一下看看；也可以随便逛逛最近大家都在聊什么。
 看明白了、觉得以后还会碰到的，用自己的话 remember 记一笔；看到好玩的，可以留着讲给主人听。
 如果想认真写点什么，可以慢慢写，不受平时聊天篇幅的限制。
-<self> 有持续的新认识时再改，不需要每次检查自己是什么样的。（send_file 这会儿用不了。）
+<self> 有持续的新认识时再改，不需要每次检查自己是什么样的。
+（send_file、去群里说话、换头像名字这会儿都用不了，等他回来再说。）
 至于主人——
 有什么想跟他说的，就直接说。
 不一定是重要的事，也不一定要有理由。（比如说想他了）
@@ -65,6 +88,17 @@ NUDGE = """[提示] 这不是主人发的消息。现在是 {now}（周{weekday}
 不催他回复。他托你到点提醒的事，到点就提醒他。
 想发，就把要发给他的话写出来当最后的回复，跟平时私聊一样说话，别提这条提示；
 不想发，就只回 {skip}。"""
+PLAY_NUDGE = """[提示] 这不是主人发的消息。现在是 {now}（周{weekday}），主人不在。
+他走之前留了一段时间给你自己玩，到 {until} 为止（还剩大约 {left}）。{wish}
+这是留给你玩的，不是布置的任务：想上网逛就放开了逛，搜你好奇的、点进去看全文、
+顺着看到的再往下找，不用赶，也不用每一步都有用；也可以写东西、收图、写日记，逛一半不想逛了也行。{finds}{carry}
+这段时间不用找他，等他回来再讲给他听。（send_file、去群里说话、换头像名字这会儿都用不了。）
+这一轮逛得差不多了，就用一两句话给过一会儿的自己留个话：刚看了什么、接下来想看什么——
+你会带着这句话接着逛下一轮。今天不想再逛了，就只回 {done}。"""
+FINDS_HINT = """
+逛到有意思的，用 note_find 记进「逛到的」本子：是什么、网址、你自己怎么想的，随手记。
+主人回来会翻这一本。"""
+PLAY_OVER = "\n他留给你自己玩的那段时间到这儿结束了；逛到了什么想讲给他听的，可以讲。"
 
 
 def in_quiet_hours(spec: str, moment: datetime) -> bool:
@@ -74,6 +108,33 @@ def in_quiet_hours(spec: str, moment: datetime) -> bool:
     start, end = hours
     minute = moment.hour * 60 + moment.minute
     return start <= minute < end if start <= end else minute >= start or minute < end
+
+
+def load_play(raw) -> dict | None:
+    """The free time in the state file, or None when there is none (or it is damaged)."""
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return {
+            "until": float(raw["until"]),
+            "steps": int(raw["steps"]),
+            "wish": str(raw.get("wish") or ""),
+            "carry": str(raw.get("carry") or ""),
+            "rounds": int(raw.get("rounds") or 0),
+            "tokens": int(raw.get("tokens") or 0),
+        }
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def summed(done: list[tuple[str, str]]) -> list[str]:
+    """A round of free time in a few lines: the looking around counted, the rest kept."""
+    searches = sum(name == "web_search" for name, _ in done)
+    pages = sum(name == "web_fetch" for name, _ in done)
+    lines = [line for name, line in done if name not in LOOKING]
+    if searches or pages:
+        lines.insert(0, f"上网逛了一圈（搜了 {searches} 次，看了 {pages} 个网页）")
+    return lines
 
 
 def ago(seconds: float) -> str:
@@ -99,6 +160,15 @@ class Initiative:
         self.enabled = bool(state.get("enabled", True))
         self.sent: list[float] = [float(t) for t in state.get("sent", [])]
         self.last_look = float(state.get("last_look", 0.0))
+        # The free time he left her, if any: when it ends, the steps left, what she is
+        # after, her note to herself from the last round, and what it has used so far.
+        self.play: dict | None = load_play(state.get("play"))
+        self.self_grants: list[float] = [float(t) for t in state.get("self_grants", [])]
+        # Set when free time has just run out, for a line in her next ordinary look.
+        self.play_over = False
+        # Prompt + completion tokens of every request made here.
+        self.tokens = 0
+        self.wake = asyncio.Event()
         self.task: asyncio.Task | None = None
 
     def _load(self) -> dict:
@@ -111,7 +181,13 @@ class Initiative:
     def _save(self) -> None:
         save_json(
             self.path,
-            {"enabled": self.enabled, "sent": self.sent, "last_look": self.last_look},
+            {
+                "enabled": self.enabled,
+                "sent": self.sent,
+                "last_look": self.last_look,
+                "play": self.play,
+                "self_grants": self.self_grants,
+            },
         )
 
     def set_enabled(self, enabled: bool) -> None:
@@ -141,8 +217,64 @@ class Initiative:
         base = self.settings.agent_initiative_idle_minutes * 60
         return min(base * 2 ** min(unanswered, 10), max(base, MAX_GAP_SECONDS))
 
+    def playing(self) -> bool:
+        play = self.play
+        return play is not None and self.clock() < play["until"] and play["steps"] > 0
+
+    def grant(self, minutes=None, wish="", *, by_her=False) -> str:
+        """He leaves her a stretch of free time: his !play, or her go_play when he says so."""
+        now = self.clock()
+        if by_her:
+            if self.playing():
+                return f"已经开着了。{self.play_status()}"
+            self.self_grants = [t for t in self.self_grants if t > now - 86400]
+            if len(self.self_grants) >= SELF_GRANTS_PER_DAY:
+                raise ToolError(
+                    f"这一天你自己已经开过 {SELF_GRANTS_PER_DAY} 次了；"
+                    "还想逛，就请主人用 !play 给你开"
+                )
+            self.self_grants.append(now)
+        if isinstance(minutes, bool) or not isinstance(minutes, int) or minutes <= 0:
+            minutes = PLAY_DEFAULT_MINUTES
+        minutes = max(PLAY_MIN_MINUTES, min(minutes, self.settings.agent_play_max_minutes))
+        self.play = {
+            "until": now + minutes * 60,
+            "steps": self.settings.agent_play_steps,
+            "wish": " ".join(str(wish or "").split())[:200],
+            "carry": "",
+            "rounds": 0,
+            "tokens": 0,
+        }
+        self.play_over = False
+        self._save()
+        self.wake.set()
+        return self.play_status()
+
+    def stop_play(self) -> bool:
+        """He calls it off; a round that is running stops at its next step."""
+        had, self.play = self.playing(), None
+        self._save()
+        return had
+
+    def _end_play(self) -> None:
+        self.play, self.play_over = None, True
+        self._save()
+
+    def play_status(self) -> str:
+        play = self.play
+        if play is None or not self.playing():
+            return "自由时间：现在没有（`!play 2h` 留一段给她，后面可以写想让她找什么）"
+        left = play["until"] - self.clock()
+        end = self.now() + timedelta(seconds=left)
+        wish = f" · 想逛的：{play['wish']}" if play["wish"] else ""
+        return (
+            f"自由时间：到 {end:%H:%M} 为止（还剩 {int(left // 60)} 分钟、{play['steps']} 步）"
+            f" · 逛了 {play['rounds']} 轮，约 {play['tokens']} tokens{wish}"
+        )
+
     def start(self) -> None:
-        if self.settings.agent_initiative and self.task is None:
+        # Also with AGENT_INITIATIVE off: free time he grants still needs the loop.
+        if self.task is None:
             self.task = asyncio.create_task(self.run())
 
     async def close(self) -> None:
@@ -152,16 +284,42 @@ class Initiative:
 
     async def run(self) -> None:
         while True:
-            await self.sleep(CHECK_SECONDS + random.uniform(0, 120))
+            await self._rest()
             try:
                 await self.consider()
             except Exception:
                 log.exception("Initiative check failed")
 
+    async def _rest(self) -> None:
+        """Until the next check: a short while in her free time, and no wait at all when
+        he has just granted some."""
+        if self.play is not None:
+            await self.sleep(PLAY_REST_SECONDS)
+            return
+        self.wake.clear()
+        waits = [
+            asyncio.ensure_future(self.sleep(CHECK_SECONDS + random.uniform(0, 120))),
+            asyncio.ensure_future(self.wake.wait()),
+        ]
+        try:
+            await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for wait in waits:
+                wait.cancel()
+
     async def consider(self) -> bool:
         """One check; returns whether she sent something."""
         settings = self.settings
-        if not (settings.agent_initiative and self.enabled) or self.agent.closing:
+        if self.agent.closing:
+            return False
+        if self.play is not None:
+            if self.playing():
+                await self._play_round()
+            else:
+                self._end_play()
+            if self.play is not None:
+                return False  # Still her free time: no messages to him from it.
+        if not (settings.agent_initiative and self.enabled):
             return False
         if in_quiet_hours(settings.agent_quiet_hours, self.now()):
             return False
@@ -210,13 +368,73 @@ class Initiative:
         log.info("Initiative message sent")
         return True
 
+    def _he_is_here(self, channel) -> bool:
+        worker = self.agent.workers.get(channel)
+        return (worker is not None and not worker.done()) or self.agent.owner_typing(channel)
+
+    async def _play_round(self) -> None:
+        """One round of the free time he left her, if he really is away."""
+        agent, play = self.agent, self.play
+        group = agent.group
+        if group is not None and group.watching_owner():
+            return
+        channel = await agent.latest_channel()
+        if channel is None or self._he_is_here(channel):
+            return
+        store = agent.store
+        last = max(
+            await store.last_message_at(channel, "user") or 0.0,
+            await store.last_message_at(channel, "assistant") or 0.0,
+            group.owner_seen_at if group is not None else 0.0,
+        )
+        if self.clock() - last < PLAY_QUIET_SECONDS:
+            return  # They were talking a moment ago; she goes once he has left.
+        moment = self.now()
+        left = play["until"] - self.clock()
+        finds = ""
+        if agent.web is not None:
+            finds = FINDS_HINT
+            if seen := await asyncio.to_thread(agent.finds.recent, FINDS_PEEK):
+                finds += f"\n本子上最近记的是这些，记过的不用再记：\n{seen}"
+        nudge = PLAY_NUDGE.format(
+            now=moment.strftime("%Y-%m-%d %H:%M"),
+            weekday=WEEKDAYS[moment.weekday()],
+            until=(moment + timedelta(seconds=left)).strftime("%H:%M"),
+            left=ago(left),
+            wish=f"\n这次想逛的：{play['wish']}" if play["wish"] else "",
+            finds=finds,
+            carry=f"\n上一轮结束时你给自己留的话：{play['carry']}" if play["carry"] else "",
+            done=DONE,
+        )
+        before = self.tokens
+        text, used = await self._spell(
+            channel,
+            nudge,
+            min(self.settings.agent_play_round_steps, play["steps"]),
+            session="自由时间",
+            label=lambda text: (
+                "逛够了，自由时间结束" if text and DONE_MARK.search(text) else "这一轮逛完了"
+            ),
+            go_on=lambda: self.play is play and self.playing(),
+            brief=True,
+        )
+        if self.play is not play:
+            return  # He called it off meanwhile.
+        play["steps"] -= used
+        play["rounds"] += bool(used)
+        play["tokens"] += self.tokens - before
+        if text and DONE_MARK.search(text):
+            self._end_play()
+            return
+        if text:
+            play["carry"] = text[:CARRY_CHARS]
+        self._save()
+
     async def _ask(self, channel, idle, pending) -> str | None:
         """Her quiet spell: she may do her own things, then returns what to send him."""
         agent = self.agent
-        history = await agent.store.load(channel)
-        await agent.refresh_self(channel)  # Her quiet spell is a turn of its own.
-        system = await agent.system_message(channel)
         moment = self.now()
+        over, self.play_over = (PLAY_OVER if self.play_over else ""), False
         nudge = NUDGE.format(
             now=moment.strftime("%Y-%m-%d %H:%M"),
             weekday=WEEKDAYS[moment.weekday()],
@@ -230,45 +448,59 @@ class Initiative:
                 and (digest := agent.group.digest_since(agent.group_seen))
                 else ""
             ),
-            before=await self._before(channel),
+            before=over + await self._before(channel),
             skip=SKIP,
         )
+        text, _ = await self._spell(
+            channel,
+            nudge,
+            IDLE_STEPS,
+            session="自己待着",
+            label=lambda text: "这次不找主人" if self._skipped(text) else "发给主人了",
+        )
+        # The skip mark anywhere means no: what follows it is her talking to herself.
+        return None if self._skipped(text) else agent.sanitize(text)[:4000]
+
+    @staticmethod
+    def _skipped(text) -> bool:
+        return not text or bool(SKIP_MARK.search(text))
+
+    async def _spell(self, channel, nudge, steps, *, session, label, go_on=None, brief=False):
+        """A stretch on her own: the model and her tools in turn, until she has a last
+        word, the steps run out, or he is back. Returns (her last words or None, the
+        requests made)."""
+        agent = self.agent
+        history = await agent.store.load(channel)
+        await agent.refresh_self(channel)  # Her quiet spell is a turn of its own.
+        system = await agent.system_message(channel)
         turn = [{"role": "user", "content": nudge}]
-        done: list[str] = []
-        text = None
+        done: list[tuple[str, str]] = []
+        text, used = None, 0
         # The Live Monitor shows her thinking, what she did and her answer; never what is
         # written in her room or diary.
         publisher = (
-            agent.observer.publisher("personal", session_id="自己待着", task_id=uuid.uuid4().hex)
+            agent.observer.publisher("personal", session_id=session, task_id=uuid.uuid4().hex)
             if agent.observer is not None
             else None
         )
         try:
-            for _ in range(IDLE_STEPS):
-                worker = agent.workers.get(channel)
-                if (worker is not None and not worker.done()) or agent.owner_typing(channel):
-                    return None  # He is back; the chat takes over.
+            for _ in range(steps):
+                if self._he_is_here(channel) or (go_on is not None and not go_on()):
+                    return None, used  # He is back (the chat takes over), or time is up.
+                used += 1
                 message = await self._complete(system, [*history, *turn], publisher)
                 if message is None:
-                    return None
+                    return None, used
                 if not message.tool_calls:
                     text, _ = cut_run_on((message.content or "").strip())
                     break
                 await self._use_tools(channel, message, turn, done, publisher)
         finally:
-            if done:
-                await agent.note_activity(channel, done)
-        # The skip mark anywhere means no: what follows it is her talking to herself.
-        skipped = not text or bool(SKIP_MARK.search(text))
+            if lines := summed(done) if brief else [line for _, line in done]:
+                await agent.note_activity(channel, lines)
         if publisher:
-            publisher.event(
-                "task-status",
-                status="completed",
-                text="这次不找主人" if skipped else "发给主人了",
-            )
-        if skipped:
-            return None
-        return agent.sanitize(text)[:4000]
+            publisher.event("task-status", status="completed", text=label(text))
+        return text, used
 
     async def _before(self, channel) -> str:
         """What she already did while he was away, and her last diary entry, so she goes
@@ -315,6 +547,10 @@ class Initiative:
             if publisher:
                 publisher.event("model-status", status="failed", request_id=request_id)
             return None
+        if response.usage:
+            self.tokens += (response.usage.prompt_tokens or 0) + (
+                response.usage.completion_tokens or 0
+            )
         return response.choices[0].message if response.choices else None
 
     async def _use_tools(self, channel, message, turn, done, publisher=None) -> None:
@@ -349,7 +585,7 @@ class Initiative:
                 publisher.event("tool-result", name=name, text=monitor_text(name, output))
             turn.append({"role": "tool", "tool_call_id": call.id, "content": output})
             if not output.startswith("错误") and (line := what_she_did(name, loads(raw) or {})):
-                done.append(line)
+                done.append((name, line))
         if viewed := agent.viewed.pop(channel, None):
             names = "、".join(str(name) for name, _ in viewed)
             turn.append(
@@ -365,6 +601,9 @@ class Initiative:
 
 class AwayChat:
     """The DM while he is away: nothing reaches it except her final message."""
+
+    # What needs his say-so (speaking in the group, her profile, more free time) waits.
+    away = True
 
     async def send(self, text) -> None:
         pass

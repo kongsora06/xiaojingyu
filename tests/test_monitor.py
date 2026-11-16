@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from rich.console import Console
 
 from discord_dfy.config import ConfigurationError, Settings
 from discord_dfy.monitor import (
@@ -27,6 +28,7 @@ from discord_dfy.monitor_protocol import (
     validate_event,
 )
 from discord_dfy.observability import prepare_directory
+from discord_dfy.streaming import publish_notes
 
 LAB = Path(__file__).resolve().parents[2] / "dsh-lab"
 
@@ -183,6 +185,26 @@ def test_renderer_is_chinese_safe_and_rate_limited():
     assert "private-key-123" not in stream.getvalue() and "\x1b" not in stream.getvalue()
     assert stream.getvalue().count("执行中") == 20
     assert renderer.capacity_commits == 0
+
+
+def test_notes_are_shown_without_verbose_in_their_own_colour():
+    sink = Sink()
+    pub = Publisher(sink, "personal", session_id="dm", task_id="task")
+    pub.event("task-status", status="running", text="他说的话")
+    publish_notes(pub, ["[附注] 上次私聊之后群里的动静：\n有人在聊游戏", "没有标记的一句"])
+    stream = io.StringIO()
+    console = Console(
+        file=stream, force_terminal=True, color_system="standard", markup=False, highlight=False
+    )
+    renderer = Renderer(stream, clock=lambda: 1.0, console=console)
+    for event in sink.events:
+        assert validate_event(event)
+        renderer.event(event)
+    renderer.refresh(force=True)
+    shown = stream.getvalue()
+    assert "他说的话" not in shown and "执行中" not in shown
+    assert "\x1b[35m[附注] 上次私聊之后群里的动静：" in shown and "有人在聊游戏" in shown
+    assert "附注  没有标记的一句" in shown
 
 
 def test_sqlite_is_readonly_missing_files_not_created_and_schema_not_invented(tmp_path):

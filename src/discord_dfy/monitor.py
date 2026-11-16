@@ -321,6 +321,15 @@ class EventTail:
 
 
 TEXT_TYPES = {"reasoning-delta", "text-delta"}
+# A task-status event with this name is a note the host gave her (streaming.NOTE): always
+# shown, in its own colour.
+NOTE, NOTE_LABEL, NOTE_STYLE = "note", "附注", "magenta"
+
+
+def is_note(event) -> bool:
+    return event["type"] == "task-status" and event["data"].get("name") == NOTE
+
+
 TERMINAL = {
     "completed",
     "ended",
@@ -492,6 +501,7 @@ class Renderer:
                 return
             if (
                 not self.verbose
+                and not is_note(event)
                 and kind in {"model-status", "task-status", "usage", "decision"}
                 and event["data"].get("status") not in ERRORS | {"cancelled"}
             ):
@@ -517,6 +527,12 @@ class Renderer:
 
     def _metadata(self, frame, event):
         self._heading(frame, event)
+        if is_note(event):
+            text = safe_text(event["data"].get("text", ""), self.secrets)
+            # Her notes carry their own "[附注]" / "[提示]" mark; anything else gets a label.
+            label = "" if text.startswith("[") else f"{NOTE_LABEL}  "
+            frame.append(f"{label}{text}\n", NOTE_STYLE)
+            return
         data = {key: value for key, value in event["data"].items() if value != ""}
         status = data.get("status")
         style = (

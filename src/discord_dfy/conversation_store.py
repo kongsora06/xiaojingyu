@@ -108,6 +108,17 @@ class ConversationStore:
             )
             return [(row[0], json.loads(row[1])) for row in await cursor.fetchall()]
 
+    async def recent(self, channel_id: int, limit: int) -> list[tuple[float, dict]]:
+        """The newest user and assistant rows of any conversation, oldest first."""
+        async with self.lock:
+            cursor = await self.db.execute(
+                "SELECT created_at, message FROM agent_messages WHERE channel_id=? "
+                "AND role IN ('user','assistant') ORDER BY id DESC LIMIT ?",
+                (channel_id, limit),
+            )
+            rows = [(row[0], json.loads(row[1])) for row in await cursor.fetchall()]
+        return rows[::-1]
+
     async def channels(self) -> list[int]:
         """Channels that have ever had a conversation (for the owner: their DM)."""
         async with self.lock:

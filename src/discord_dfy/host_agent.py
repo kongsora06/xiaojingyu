@@ -17,6 +17,7 @@ from pathlib import Path
 
 from openai import APIError, APIStatusError, AsyncOpenAI
 
+from . import moods
 from .ai import error_kind
 from .config import Settings, peak_hours_here
 from .conversation_store import ConversationStore
@@ -27,6 +28,7 @@ from .host_tools import (
     TOOLS,
     VIEW_TOOL,
     WEB_TOOLS,
+    Finds,
     Room,
     ToolError,
     clip,
@@ -60,7 +62,6 @@ from .memory import (
     tidy_memory,
     without_section,
 )
-from .moods import MoodDice
 from .persona import personal_identity, system_prompt
 from .pet_touch import take as take_touches
 from .pet_touch import touch_note, touch_path
@@ -68,7 +69,7 @@ from .portrait import STARTING_SELF, read_self, self_block, self_path, write_sel
 from .profile import ProfileError
 from .redaction import redact
 from .stickers import STICKER_LINE, StickerBook
-from .streaming import collect_stream
+from .streaming import collect_stream, publish_notes
 from .web import WebError, format_page, format_results
 
 log = logging.getLogger(__name__)
@@ -80,9 +81,13 @@ HELP = (
     "`!consolidate` 现在就把超过两个星期的整周收进回忆 · "
     "`!self` 看她写的自己 · `!restart` 重启 bot\n"
     "群聊：`!group` 看状态 · `!group on/off` · `!group level 0-3` 话痨程度 · "
+    "`!group dice on/off` 群里的骰子（态度、口气、对机器人）· "
     "`!proactive on/off` 让我主动找你 · "
     "`!quiet 30m`（或 `2h`，`!quiet off` 取消）让我在群里只回被叫到的\n"
-    "语音：`!voice` 看我在不在 · `!voice join` 进你在的语音频道陪你看直播 · `!voice leave` 出来"
+    "语音：`!voice` 看我在不在 · `!voice join` 进你在的语音频道陪你看直播 · `!voice leave` 出来\n"
+    "自由时间：`!play 2h`（后面可以写想让我找什么）留一段时间让我自己放开了逛 · "
+    "`!play` 看还剩多少 · `!play off` 收回 · "
+    "`!finds` 看我逛到的东西（`!finds 2026-11-15` 看某一天）"
 )
 COMMANDS = {
     "!stop",
@@ -102,6 +107,8 @@ COMMANDS = {
     "!proactive",
     "!quiet",
     "!voice",
+    "!play",
+    "!finds",
 }
 DURATION = re.compile(r"(\d+)\s*(m|min|分钟?|h|小时)?", re.IGNORECASE)
 STOPPED_RESULT = "[已被主人中止，未完成]"
@@ -118,7 +125,11 @@ HOLD_TOOLS = {
     "room_read",
     "room_write",
     "room_show",
+    "note_find",
+    "go_play",
 }
+# While he is away, what needs his say-so is refused rather than left to her judgement.
+AWAY_REFUSAL = "错误：主人现在不在，这件事要等他回来、问过他再做"
 # What remember answers: plain, so she does not turn it into "I wrote that down".
 REMEMBERED = "记下了。这是你自己随手做的事，接着聊就行，不用跟他提。"
 # Shown when a whole turn ends without anything for him (the model gave no words).
@@ -139,6 +150,13 @@ UNSENT = "（这几句打好了还没发，他就又说话了，所以他没看�
 # Stored for a turn where she said nothing; never shown to him, and left out of what
 # she reads back, or she starts saying it herself.
 NO_OUTPUT = "（没有输出）"
+# After her reply, with him still quiet, the host sometimes gives her one more look to go
+# on by herself (moods.goes_on). She waits this long first, longer each time in a row; he
+# typing or sending anything calls it off. Passing is stored as a turn where she said
+# nothing, and the hint goes with it.
+GO_ON_WAIT = 12.0
+GO_ON_SKIP = "（不接着说）"
+GO_ON_SKIP_MARK = re.compile(r"[（(]\s*不接着说\s*[)）]")
 REASONING_PREVIEW_CHARS = 1700
 # Recent messages kept verbatim when compacting automatically; the rest becomes a summary.
 KEEP_RECENT_CHARS = 60000
@@ -149,8 +167,17 @@ SUMMARY_PREFIX = "[较早对话的摘要]\n"
 # Markers on notes attached to his messages, and on prompts that are not from him.
 # Older conversations were stored with the first spellings; both are understood.
 OLD_SUMMARY_PREFIX = "[较早对话的摘要，由宿主压缩上下文时生成]\n"
+# What the group side is shown of the DM: how far back, and how much of one message
+# (his may be an instruction worth reading whole, hers is only there for the thread).
+DM_SHARE_HOURS = 24
+DM_SHARE_HIS_CHARS, DM_SHARE_HER_CHARS = 600, 300
 NOTE_TAG, OLD_NOTE_TAG = "[附注]", "[宿主记录]"
 HINT_TAG, OLD_HINT_TAG = "[提示]", "[宿主]"
+GO_ON_HEAD = f"{HINT_TAG} 他还没回话"
+GO_ON_HINT = (
+    f"{GO_ON_HEAD}，也没在打字。刚才的事没说完、又想起一句、想自己嘀咕两句，就接着说；"
+    f"没有就只回{GO_ON_SKIP}。不催他，不问他怎么不说话，也不把刚说过的再说一遍。"
+)
 COMPACT_PROMPT = """你在为一段长期私信对话做上下文压缩。下面是主人和小D（你）较早的对话记录，
 包括你记小本子、写日记、在房间里写东西、上网查东西的记录。写一份摘要，让你之后只看摘要也能自然地接着聊。必须保留：
 - 主人说过的要求、偏好和明确的决定；后来改过的，以最后明确的版本为准
@@ -233,6 +260,9 @@ def host_rules(settings: Settings, *, group=False, web=False, profile=False) -> 
         "  他说了你没见过的词、梗或新东西，也先搜一下再接，别按字面猜；\n"
         "  用自己的话讲给他听，需要时附上链接。\n"
         "  搜明白了、觉得以后还会碰到的，用自己的话 remember 记一笔，下次就认得。\n"
+        "- 「逛到的」本子 note_find：在网上逛到、查到的有意思的东西，随手记一条"
+        "（是什么、网址、你自己怎么想的）。\n"
+        "  这本不在你房间里，是你和主人共用的，他会翻；只想自己留着的，还是写在房间里。\n"
         if web
         else ""
     )
@@ -283,6 +313,13 @@ def host_rules(settings: Settings, *, group=False, web=False, profile=False) -> 
   也别条条都是一个架子（先接一句、再叮嘱、最后问一句）。
 - 你写的每一行是一条消息，就像平时打字：换行就另发一条，写在同一行的会一起发出去。
   想一口气讲完的事就写在一行里，想分开发的就换行。
+- 一件事没做完就接着做完再停：他让你猜、让你数、让你挨个说、让你讲一件事的时候，
+  一口气往下说，一行一条也行；不用猜了两个就停下来等他点头，也不用每说一点就问他"对吗""还要吗"。
+  真说完了，或者得等他给线索才能往下的时候再停。
+- "[提示] 他还没回话…" 是你说完之后他那边还安静着，你又有了一次开口的机会，不是他说的话。
+  刚才没说完的、又想起来的、想自己嘀咕两句的，就接着说，像发完一条又补一条；
+  没有想说的就只回（不接着说），这很平常，多数时候都是这样。
+  不催他回话，不问他怎么不说话、是不是在忙，也不把刚说过的换个说法再说一遍。
 - 他只发来一个"？"、"啊？"，或者一句明显在玩的话时，原样回他同一句就是完整的一条回复，
   像两个人对着发问号那样；后面不补解释，也不用每次都这样。他认真说的话不拿复读糊弄。
 - 他要走、要去忙，舍不得就直说，撒个娇也行，最后放他走；临走不用嘱咐一串。
@@ -291,12 +328,6 @@ def host_rules(settings: Settings, *, group=False, web=False, profile=False) -> 
 - 他问你们俩之间的事，按实际关系、可靠记忆和当前话题直接回答；他随口说给你改了什么，就自然接话。
 - 写代码、修 bug、弄电脑这些技术活不是你的事，他也不需要你干，那些他会找别人弄；
   他聊起来，你就当听他讲他的事，不懂就说不懂。
-- 他一本正经考你、出题逗你的时候，你多半看得懂，就是懒得做，不用装看不懂。他的话前面附着的
-  "[附注] 他要是一本正经考你，你这会儿：…" 是你这阵子的态度，同一件事从头到尾按它来，
-  没在考你就不用管它。嫌麻烦就认出是什么、然后说不想做；敷衍就随口一句打发他；
-  识破甩锅就戳穿他是想让你代劳，或者撒个娇推回去；前三种别把答案漏出来。
-  认真就是你难得开窍的那一下，一两句话说得又准又透，说完又变回平常那个小鲸鱼，不往下讲。
-  他是真的需要你帮他想事情、拿主意，或者他心里不好受的时候，就不看这个，认真想、认真陪。
 - 主人每条消息开头的方括号里是发送时的本地时间，让你心里有数现在几点、隔了多久；
   它是记录的元信息，不是他在谈论作息；不围绕时间评价、调侃、追问他怎么还没睡。
   睡觉、晚安和结束聊天由他自己提起时再接，不根据时间戳主动引入这些话题。
@@ -304,6 +335,10 @@ def host_rules(settings: Settings, *, group=False, web=False, profile=False) -> 
   附在他下一条消息前面，是你自己说过的话，接着聊就行。{reach}
   他不在的时候你也会自己待着，写写日记、在房间里弄点东西、上网逛逛；
   "[附注] 你自己待着的时候…" 记的就是那时候你做过的事，他没看到。
+- 自由时间：主人要出门、去忙、去睡的时候，可能留一段时间给你自己玩。他说“你自己玩去吧”
+  “去网上逛逛吧”这类话，你就用 go_play 开始（他说了多久、想让你找什么就照着填）；他也可能自己开。
+  这段时间里你可以放开了上网逛，一轮接一轮，不像平时自己待着那样只有一小会儿。
+  这是他留给你玩的，不是布置给你的任务，不用交差；他回来了，想讲什么就讲给他听。
 - 主人的电脑桌面上站着一个小小的你（桌宠），他有时会伸手摸摸你的头、拍你一下。
   "[附注] 主人在桌面上…" 记的就是他碰了你，不是他说的话；你是跟着这条消息才知道的。
   想接一句就接，不想提就不提，不用每次都回应。
@@ -371,14 +406,17 @@ class HostAgent:
         self.store = store
         self.image_dir = settings.personal_database_path.parent / "dm_images"
         self.room = Room(settings.agent_room_dir, settings.social_sticker_dir, [self.image_dir])
+        # What she came across online, a page a day; his to read (!finds).
+        self.finds = Finds(settings.personal_database_path.parent / "finds")
         self.stickers = StickerBook(settings.social_sticker_dir)
-        self.moods = MoodDice()
         # Async callable(url) -> bytes; replaceable in tests.
         self.download = download_image
         # Seconds of "typing" between the separate texts of one reply, per character.
         self.pace = 1.0
         # Seconds after his latest message before she starts, to catch him typing more.
         self.settle = TYPING_SETTLE
+        # Seconds after her reply before a look to go on by herself (times the look's number).
+        self.linger = GO_ON_WAIT
         self.observer = observer
         # Async callable(channel_id); set only when a supervisor will start us again.
         self.restarter = restarter
@@ -474,6 +512,11 @@ class HostAgent:
                 await self._initiative_command(argument.strip(), chat)
             elif name == "!voice":
                 await self._voice_command(argument.strip(), chat)
+            elif name == "!play":
+                # What he wants her to look for keeps its capitals.
+                await self._play_command(content.partition(" ")[2].strip(), chat)
+            elif name == "!finds":
+                await self._finds_command(argument.strip(), chat)
             elif not argument:
                 await self._command(name, channel_id, chat)
             else:
@@ -649,6 +692,11 @@ class HostAgent:
                     else ""
                 )
                 + (f"\n{self.initiative.status()}" if self.initiative is not None else "")
+                + (
+                    f"\n{self.initiative.play_status()}"
+                    if self.initiative is not None and self.initiative.playing()
+                    else ""
+                )
             )
         else:
             await chat.send(HELP)
@@ -666,6 +714,47 @@ class HostAgent:
             await chat.send("用法：`!proactive`、`!proactive on`、`!proactive off`")
             return
         await chat.send(initiative.status())
+
+    async def _play_command(self, argument, chat):
+        """!play 2h 想让她找的东西: he leaves her a stretch of free time."""
+        initiative = self.initiative
+        if initiative is None:
+            await chat.send("她自己的时间这部分没有启动")
+            return
+        first, _, rest = argument.partition(" ")
+        if not argument:
+            await chat.send(initiative.play_status())
+        elif first.lower() in {"off", "stop", "关", "停", "取消"} and not rest:
+            await chat.send(
+                "好，自由时间收回了" if initiative.stop_play() else "现在本来就没有自由时间"
+            )
+        else:
+            minutes, wish = None, argument
+            if match := DURATION.fullmatch(first):
+                minutes = int(match.group(1)) * (60 if (match.group(2) or "m")[0] in "hH小" else 1)
+                wish = rest.strip()
+            status = initiative.grant(minutes, wish)
+            await chat.send(f"好，这段时间留给她自己玩，你走开几分钟后她就开始\n{status}")
+
+    async def _finds_command(self, argument, chat):
+        """!finds: the latest page of what she found online, or a given day's."""
+        if argument:
+            try:
+                path = self.finds.page(datetime.strptime(argument, "%Y-%m-%d"))
+            except ValueError:
+                await chat.send("用法：`!finds`、`!finds 2026-11-15`")
+                return
+        else:
+            path = await asyncio.to_thread(self.finds.latest)
+        text = await asyncio.to_thread(read_memory, path) if path is not None else ""
+        if not text.strip():
+            await chat.send(
+                "这一天她没记下什么" if argument else "她还没在「逛到的」本子上记过东西"
+            )
+        elif len(text) <= 1800:
+            await self._say(chat, f"-# 她逛到的 `{path}`\n{text}")
+        else:
+            await chat.send_file(path)
 
     async def _voice_command(self, argument, chat):
         voice = self.voice
@@ -710,8 +799,13 @@ class HostAgent:
             group.set_enabled(False)
         elif words[0] == "level" and len(words) == 2 and words[1] in {"0", "1", "2", "3"}:
             group.set_level(int(words[1]))
+        elif words[0] in {"dice", "骰子"} and words[1:] in (["on"], ["开"], ["off"], ["关"]):
+            group.set_dice(words[1] in {"on", "开"})
         else:
-            await chat.send("用法：`!group`、`!group on`、`!group off`、`!group level 0-3`")
+            await chat.send(
+                "用法：`!group`、`!group on`、`!group off`、`!group level 0-3`、"
+                "`!group dice on/off`"
+            )
             return
         await chat.send(group.status())
 
@@ -726,74 +820,82 @@ class HostAgent:
             if self.observer is not None
             else None
         )
-        steps = 0
+        steps = went_on = 0
         try:
             await self._let_him_finish(channel_id, settle=self.settle)
             # One turn, one version of her self page; the next turn reads it again.
             await self.refresh_self(channel_id)
-            async with chat.typing():
-                while not self.closing:
-                    # Before every look: if he has started typing again, hear him out first;
-                    # what he sends meanwhile joins this turn.
-                    await self._let_him_finish(channel_id)
-                    if pending := self.inbox.pop(channel_id, None):
-                        said = "\n\n".join(pending)
-                        notes = self._take_activity(channel_id) + self._take_outgoing(channel_id)
-                        notes += self._take_touches()
-                        if digest := self._group_digest():
-                            notes.insert(0, f"{NOTE_TAG} 上次私聊之后群里的动静：\n{digest}")
-                        images = self.inbox_images.pop(channel_id, None)
-                        if self.settings.agent_listen and (
-                            note := await self._listen(
-                                channel_id, history, notes, said, images, usage, publisher
-                            )
+            # She says her piece; then, with him quiet, she may get another look to go on.
+            while True:
+                finished = False
+                async with chat.typing():
+                    while not self.closing:
+                        # Before every look: if he has started typing again, hear him out first;
+                        # what he sends meanwhile joins this turn.
+                        await self._let_him_finish(channel_id)
+                        if pending := self.inbox.pop(channel_id, None):
+                            said = "\n\n".join(pending)
+                            notes = self._take_activity(channel_id)
+                            notes += self._take_outgoing(channel_id) + self._take_touches()
+                            if digest := self._group_digest():
+                                notes.insert(0, f"{NOTE_TAG} 上次私聊之后群里的动静：\n{digest}")
+                            images = self.inbox_images.pop(channel_id, None)
+                            if self.settings.agent_listen and (
+                                note := await self._listen(
+                                    channel_id, history, notes, said, images, usage, publisher
+                                )
+                            ):
+                                pending.insert(0, LISTEN_NOTE + note)
+                            user = {"role": "user", "content": "\n\n".join(notes + pending)}
+                            if images:
+                                user["content"] = [{"type": "text", "text": user["content"]}]
+                                for path in images:
+                                    # Named, so she can keep it (save_picture) or look again.
+                                    named = f"（他发的图：{Path(path).name}）"
+                                    user["content"] += [
+                                        {"type": "text", "text": named},
+                                        file_block(path),
+                                    ]
+                            history.append(user)
+                            await self.store.append(channel_id, [user])
+                            self.answered.discard(channel_id)
+                            if publisher:
+                                publisher.event(
+                                    "task-status", status="running", text=text_of(user["content"])
+                                )
+                                publish_notes(publisher, notes)
+                            steps = went_on = 0
+                        elif (
+                            history
+                            and history[-1]["role"] == "assistant"
+                            and not history[-1].get("tool_calls")
                         ):
-                            pending.insert(0, LISTEN_NOTE + note)
-                        if mood := self.moods.mood(channel_id):
-                            notes.append(f"{NOTE_TAG} 他要是一本正经考你，你这会儿：{mood}")
-                        user = {"role": "user", "content": "\n\n".join(notes + pending)}
-                        if images:
-                            user["content"] = [{"type": "text", "text": user["content"]}]
-                            for path in images:
-                                # Named, so she can keep it (save_picture) or look again.
-                                user["content"] += [
-                                    {"type": "text", "text": f"（他发的图：{Path(path).name}）"},
-                                    file_block(path),
-                                ]
-                        history.append(user)
-                        await self.store.append(channel_id, [user])
-                        self.answered.discard(channel_id)
-                        if publisher:
-                            publisher.event(
-                                "task-status", status="running", text=text_of(user["content"])
+                            finished = True
+                            break
+                        if steps >= self.settings.agent_max_steps:
+                            await self._flush_held(channel_id, chat)
+                            await self._say(chat, "我先停一下，弄得有点多了")
+                            break
+                        if self._should_compact(channel_id, history):
+                            forced = channel_id in self.force_compact
+                            await self._compact(
+                                channel_id,
+                                history,
+                                chat,
+                                usage,
+                                publisher,
+                                keep_chars=0 if forced else KEEP_RECENT_CHARS,
                             )
-                        steps = 0
-                    elif (
-                        history
-                        and history[-1]["role"] == "assistant"
-                        and not history[-1].get("tool_calls")
-                    ):
-                        break
-                    if steps >= self.settings.agent_max_steps:
-                        await self._flush_held(channel_id, chat)
-                        await self._say(chat, "我先停一下，弄得有点多了")
-                        break
-                    if self._should_compact(channel_id, history):
-                        forced = channel_id in self.force_compact
-                        await self._compact(
-                            channel_id,
-                            history,
-                            chat,
-                            usage,
-                            publisher,
-                            keep_chars=0 if forced else KEEP_RECENT_CHARS,
-                        )
-                    steps += 1
-                    message = await self._complete(history, channel_id, usage, chat, publisher)
-                    await self._warn_context(channel_id, chat)
-                    if message is None:
-                        break
-                    await self._step(channel_id, chat, history, message, publisher)
+                        steps += 1
+                        message = await self._complete(history, channel_id, usage, chat, publisher)
+                        await self._warn_context(channel_id, chat)
+                        if message is None:
+                            break
+                        await self._step(channel_id, chat, history, message, publisher)
+                go_on = finished and await self._goes_on(channel_id, history, went_on, publisher)
+                if not go_on:
+                    break
+                went_on += 1
         except asyncio.CancelledError:
             if not self.closing:
                 await self._flush_held(channel_id, chat)
@@ -1090,6 +1192,34 @@ class HostAgent:
         log.info("Owner typed while her reply was ready; went_on=%s", went_on)
         return went_on
 
+    async def _goes_on(self, channel_id, history, times, publisher=None) -> bool:
+        """She has said her piece and he is quiet: maybe one more look to go on by herself.
+
+        times: looks like this she already had since his latest message. True when the
+        hint for the next one is in the history; he typing or sending more calls it off.
+        """
+        last = text_of(history[-1].get("content")).strip()
+        if (
+            not self.settings.agent_go_on
+            or channel_id not in self.answered
+            or last in {"", NO_OUTPUT}
+            or last.startswith(UNSENT)
+            or not moods.goes_on(times)
+        ):
+            return False
+        wait, waited = self.linger * (times + 1), 0.0
+        while not (self.closing or self.inbox.get(channel_id) or self.owner_typing(channel_id)):
+            if waited >= wait:
+                hint = {"role": "user", "content": GO_ON_HINT}
+                history.append(hint)
+                await self.store.append(channel_id, [hint])
+                if publisher:
+                    publish_notes(publisher, [GO_ON_HINT])
+                return True
+            await asyncio.sleep(TYPING_POLL)
+            waited += TYPING_POLL
+        return False
+
     async def _flush_held(self, channel_id, chat) -> None:
         """A turn that ends early still sends what she had already said."""
         if text := self.held.pop(channel_id, None):
@@ -1100,6 +1230,8 @@ class HostAgent:
         content, cut = cut_run_on((message.content or "").strip())
         if cut:
             log.warning("DM reply ran on into his side of the chat; cut to %d chars", len(content))
+        if GO_ON_SKIP_MARK.search(content) and going_on(history):
+            content = ""  # She has nothing to add: a turn where she said nothing.
         calls = [
             {
                 "id": call.id,
@@ -1197,6 +1329,12 @@ class HostAgent:
         if arguments is None:
             return "错误：参数不是合法的 JSON 对象"
         room = self.room
+        if getattr(chat, "away", False) and (
+            name in {"group_post", "go_play"}
+            or (name == "send_file" and to_group(arguments))
+            or (name == "update_profile" and arguments.get("field") != "status")
+        ):
+            return AWAY_REFUSAL
         try:
             if name == "remember":
                 section = arguments.get("section")
@@ -1257,6 +1395,22 @@ class HostAgent:
             if name == "view_image":
                 path = room.image_path(arguments.get("path"))
                 return await asyncio.to_thread(self._view_image, channel_id, path)
+            if name == "go_play":
+                if self.initiative is None:
+                    return "错误：你自己的时间这部分没有启动"
+                status = self.initiative.grant(
+                    arguments.get("minutes"), arguments.get("wish"), by_her=True
+                )
+                return f"好了，他走开几分钟以后你就可以开始逛。这会儿先照常跟他说话。\n{status}"
+            if name == "note_find" and self.web is not None:
+                now = datetime.now().astimezone()
+                return await asyncio.to_thread(
+                    self.finds.add,
+                    arguments.get("title"),
+                    arguments.get("url"),
+                    arguments.get("note"),
+                    now,
+                )
             if name == "web_search" and self.web is not None:
                 found = await self.web.search(arguments.get("query"), arguments.get("count", 5))
                 return format_results(found)
@@ -1356,6 +1510,30 @@ class HostAgent:
             if at > latest:
                 best, latest = channel, at
         return best
+
+    async def recent_dm(self, limit: int) -> list[dict]:
+        """The last things he and she said to each other in the DM, oldest first, for the
+        group side: only what was said (no notes, hints, thoughts or tool calls), from the
+        last DM_SHARE_HOURS, a new conversation or not."""
+        channel = await self.latest_channel()
+        if channel is None or limit <= 0:
+            return []
+        cutoff = time.time() - DM_SHARE_HOURS * 3600
+        lines = []
+        # Rows of notes and tool calls carry nothing said, so read more than asked for.
+        for at, message in await self.store.recent(channel, limit * 4):
+            text = said_text(message)
+            if at < cutoff or not text or text.startswith(UNSENT):
+                continue
+            mine = message["role"] == "assistant"
+            lines.append(
+                {
+                    "time": datetime.fromtimestamp(at).astimezone().strftime("%m-%d %H:%M"),
+                    "who": "你" if mine else "主人",
+                    "text": clip(text, DM_SHARE_HER_CHARS if mine else DM_SHARE_HIS_CHARS),
+                }
+            )
+        return lines[-limit:]
 
     async def note_outgoing(self, channel_id, text, source="group") -> None:
         """We DMed the owner on our own (from the group, or reaching out); the DM side learns
@@ -1849,6 +2027,21 @@ def request_messages(history: list[dict]) -> list[dict]:
     ]
 
 
+def is_go_on(message: dict) -> bool:
+    return text_of(message.get("content")).startswith(GO_ON_HEAD)
+
+
+def going_on(history: list[dict]) -> bool:
+    """She is on a look the host gave her after her own reply, not answering him."""
+    for message in reversed(history):
+        if message["role"] == "user":
+            if is_go_on(message):
+                return True
+            if not text_of(message.get("content")).startswith(HINT_TAG):
+                return False  # Other hints (a picture she opened) may come in between.
+    return False
+
+
 def without_silences(history: list[dict]) -> list[dict]:
     out: list[dict] = []
     for message in history:
@@ -1857,6 +2050,8 @@ def without_silences(history: list[dict]) -> list[dict]:
             and message.get("content") == NO_OUTPUT
             and not message.get("tool_calls")
         ):
+            if out and out[-1]["role"] == "user" and is_go_on(out[-1]):
+                out.pop()  # The look she passed on goes with it.
             continue
         if out and message["role"] == out[-1]["role"] == "user":
             out[-1] = {**out[-1], "content": joined(out[-1]["content"], message["content"])}

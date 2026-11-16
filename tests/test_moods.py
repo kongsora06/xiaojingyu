@@ -13,17 +13,26 @@ def test_serious_moods_follow_the_four_three_two_one_odds():
         assert abs(counts[name] / 10000 - weight / 10) < 0.02
 
 
-def test_group_tone_is_three_gentle_to_seven_sharp():
+def test_group_tone_is_mostly_absurd_teasing_with_a_little_bite():
     rng = random.Random(7)
     counts = Counter(moods.group_tone(rng) for _ in range(10000))
+    assert abs(counts["抽象"] / 10000 - 0.5) < 0.02
     assert abs(counts["温柔"] / 10000 - 0.3) < 0.02
-    assert abs(counts["毒舌"] / 10000 - 0.7) < 0.02
+    assert abs(counts["毒舌"] / 10000 - 0.2) < 0.02
 
 
 def test_she_joins_an_echo_about_half_the_time():
     rng = random.Random(7)
     joined = sum(moods.joins_echo(rng) for _ in range(10000))
     assert abs(joined / 10000 - moods.ECHO_ODDS) < 0.02
+
+
+def test_she_goes_on_less_each_time_and_never_past_the_third():
+    rng = random.Random(7)
+    for times, odds in enumerate(moods.GO_ON_ODDS):
+        went = sum(moods.goes_on(times, rng) for _ in range(10000))
+        assert abs(went / 10000 - odds) < 0.02
+    assert not any(moods.goes_on(len(moods.GO_ON_ODDS), rng) for _ in range(100))
 
 
 def test_a_mood_holds_through_a_chat_then_rolls_again(monkeypatch):

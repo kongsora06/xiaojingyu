@@ -108,6 +108,7 @@ def agent_settings(settings, tmp_path):
         agent_memory_path=tmp_path / "memory.md",
         agent_reflect_seconds=0,
         agent_listen=False,
+        agent_go_on=False,
     )
 
 
@@ -197,6 +198,7 @@ async def test_she_keeps_notes_quietly_with_a_persons_tools(make_agent, store, a
         "room_write",
         "room_show",
         "save_picture",
+        "go_play",
         "send_file",
         "view_image",
     }
@@ -228,6 +230,44 @@ async def test_history_carries_into_next_message(make_agent):
     assert [m["role"] for m in messages] == ["system", "user", "assistant", "user"]
     assert messages[2]["content"] == "第一次" and "reasoning_content" not in messages[2]
     assert messages[3]["content"].endswith("] 二")
+
+
+async def test_after_her_reply_she_may_go_on_by_herself(make_agent, monkeypatch):
+    rolls = []
+    monkeypatch.setattr(moods, "goes_on", lambda times: rolls.append(times) or len(rolls) < 3)
+    provider = Provider(
+        completion("我猜是猫"),
+        completion("要不就是狗"),
+        completion(host_agent.GO_ON_SKIP),
+        completion("都不对"),
+    )
+    agent = await make_agent(provider, agent_go_on=True)
+    agent.linger = 0
+    chat = Chat()
+    await say(agent, chat, "猜猜我养了什么")
+    # She went on once, then had nothing to add: that is not sent, and not asked again.
+    assert chat.sent == ["我猜是猫", "要不就是狗"] and rolls == [0, 1]
+    assert provider.bodies[1]["messages"][-1]["content"] == host_agent.GO_ON_HINT
+    await say(agent, chat, "再猜")
+    # The look she passed on leaves nothing behind; the one she used stays.
+    messages = provider.bodies[3]["messages"]
+    roles = ["system", "user", "assistant", "user", "assistant", "user"]
+    assert [m["role"] for m in messages] == roles
+    assert messages[3]["content"] == host_agent.GO_ON_HINT
+    assert messages[4]["content"] == "要不就是狗" and messages[5]["content"].endswith("] 再猜")
+    assert rolls == [0, 1, 0]  # His new message starts the count over.
+
+
+async def test_she_does_not_go_on_when_the_dice_says_no_or_he_is_typing(make_agent, monkeypatch):
+    monkeypatch.setattr(moods, "goes_on", lambda times: False)
+    provider = Provider(completion("一"), completion("二"))
+    agent = await make_agent(provider, agent_go_on=True)
+    agent.linger = 0
+    chat = Chat()
+    await say(agent, chat, "嗯")
+    monkeypatch.setattr(moods, "goes_on", lambda times: agent.note_typing(CHANNEL) or True)
+    await say(agent, chat, "哦")
+    assert chat.sent == ["一", "二"] and len(provider.bodies) == 2
 
 
 def test_cut_run_on_stops_where_she_writes_his_turn():
@@ -262,6 +302,15 @@ def test_turns_where_she_said_nothing_are_left_out_of_her_context():
     assert request_messages(history[:2] + [{"role": "user", "content": "b"}]) == [
         {"role": "user", "content": "a\n\nb"}
     ]
+    passed = [
+        {"role": "user", "content": "a"},
+        {"role": "assistant", "content": "c"},
+        {"role": "user", "content": host_agent.GO_ON_HINT},
+        {"role": "assistant", "content": host_agent.NO_OUTPUT},
+        {"role": "user", "content": "b"},
+    ]
+    # A look to go on that she passed on goes too, hint and all.
+    assert request_messages(passed) == [passed[0], passed[1], passed[4]]
 
 
 async def test_run_on_reply_is_cut_before_sending_and_storing(make_agent, store):
@@ -566,6 +615,8 @@ def test_agent_settings_from_env(tmp_path):
     )
     assert settings.agent_room_dir == tmp_path / "room" and settings.agent_model == "deepseek-pro"
     assert not settings.agent_thinking and settings.agent_max_steps == 5
+    assert settings.agent_go_on
+    assert not Settings.from_env({**base, "AGENT_GO_ON": "false"}).agent_go_on
     assert Settings.from_env({**base, "AGENT_ROOM_DIR": ""}).agent_room_dir == Path("data/room")
     with pytest.raises(ConfigurationError, match="AGENT_REASONING_EFFORT"):
         Settings.from_env({**base, "AGENT_REASONING_EFFORT": "huge"})
@@ -624,21 +675,15 @@ async def test_discord_reads_owner_text_files_into_the_dm(agent_settings, storag
     )
 
 
-@pytest.fixture(autouse=True)
-def no_mood_roll(monkeypatch):
-    """The quiz mood is a dice roll; most tests look at his words without it."""
-    monkeypatch.setattr(moods, "serious_mood", lambda: "")
-
-
-async def test_each_turn_tells_her_how_she_would_take_a_quiz(make_agent, monkeypatch):
+async def test_no_quiz_dice_in_the_dm(make_agent, monkeypatch):
+    # The dice for brushing off a quiz is for the group; with him she is just herself.
     monkeypatch.setattr(moods, "serious_mood", lambda: "嫌麻烦")
     provider = Provider(completion("嗯？"))
     agent = await make_agent(provider)
     await say(agent, Chat(), "1+1 等于几")
-    said = provider.bodies[0]["messages"][-1]["content"]
-    assert said.startswith("[附注] 他要是一本正经考你，你这会儿：嫌麻烦\n\n")
-    assert said.endswith("1+1 等于几")
-    assert "他要是一本正经考你" in provider.bodies[0]["messages"][0]["content"]
+    system, said = (provider.bodies[0]["messages"][i]["content"] for i in (0, -1))
+    assert said.startswith("[20") and said.endswith("] 1+1 等于几")
+    assert "一本正经考你" not in system and "嫌麻烦" not in system + said
 
 
 async def test_system_prompt_is_constant_and_messages_carry_time(make_agent):
@@ -756,6 +801,36 @@ async def test_monitor_shows_her_first_reaction_and_moves_on(make_agent):
     assert not renderer.streams and not renderer.pending
     shown = out.getvalue()
     assert shown.index("（先听懂）这么晚还来找我") < shown.index("在呢")
+
+
+async def test_monitor_shows_her_notes_without_verbose(make_agent, monkeypatch):
+    monkeypatch.setattr(moods, "goes_on", lambda times: times == 0)
+    responses = [
+        sse_response(chunk({"content": "在呢"})),
+        sse_response(chunk({"content": host_agent.GO_ON_SKIP})),
+    ]
+
+    async def provider(request):
+        return responses.pop(0)
+
+    agent = await make_agent(provider, agent_go_on=True)
+    agent.linger = 0
+    agent.observer = Observer()
+    await agent.note_activity(CHANNEL, ["写了日记"])
+    await say(agent, Chat(), "还没睡")
+    out = io.StringIO()
+    renderer = Renderer(out, no_color=True, clock=lambda: 1e12)
+    for event in agent.observer.sink.events:
+        renderer.event(event)
+        renderer.refresh(force=True)
+    shown = out.getvalue()
+    # What the host told her with his words, then the look to go on and what she made of it.
+    note = shown.index("[附注] 你自己待着的时候")
+    hint = shown.index("[提示] 他还没回话")
+    assert "- 写了日记" in shown
+    assert note < shown.index("在呢") < hint < shown.index(host_agent.GO_ON_SKIP)
+    # His own words and the task states stay verbose-only.
+    assert "还没睡" not in shown and "执行中" not in shown
 
 
 async def test_think_toggle_folds_reasoning_into_dm(make_agent):
@@ -971,6 +1046,9 @@ class FakeGroup:
     def set_level(self, value):
         self.calls.append(("level", value))
 
+    def set_dice(self, value):
+        self.calls.append(("dice", value))
+
     def quiet(self, seconds):
         self.calls.append(("quiet", seconds))
 
@@ -985,6 +1063,9 @@ class FakeGroup:
         ("!group on", [("enabled", True)]),
         ("!GROUP OFF", [("enabled", False)]),
         ("!group level 3", [("level", 3)]),
+        ("!group dice off", [("dice", False)]),
+        ("!group dice on", [("dice", True)]),
+        ("!group 骰子 关", [("dice", False)]),
         ("!quiet", [("quiet", 1800)]),
         ("!quiet 45m", [("quiet", 2700)]),
         ("!quiet 2h", [("quiet", 7200)]),
@@ -2393,3 +2474,239 @@ async def test_voice_commands_from_dm(make_agent):
     assert agent.voice.acts == ["join", "leave"] and chat.sent[-1] == "没在语音里"
     await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content="!voice dance", chat=chat)
     assert "用法" in chat.sent[-1] and provider.bodies == [] and not agent.workers
+
+
+async def dm(agent, chat, content):
+    await agent.handle_dm(owner_id=OWNER, channel_id=CHANNEL, content=content, chat=chat)
+
+
+async def test_free_time_goes_round_after_round_and_she_tells_him_afterwards(make_agent):
+    provider = Provider(
+        completion("路上小心"),
+        completion(
+            "",
+            [
+                ("web_search", {"query": "蓝鲸"}),
+                ("note_find", {"title": "蓝鲸", "url": "https://r.example", "note": "好大一只"}),
+            ],
+        ),
+        completion("刚看了蓝鲸，接下来想看座头鲸"),
+        completion("（逛够了）"),
+        completion("我看到蓝鲸了"),
+    )
+    agent, initiative, clock, sent = await setup(make_agent, provider)
+    agent.web = FakeWeb()
+    chat = Chat()
+    await say(agent, chat, "我出门了")
+    await dm(agent, chat, "!play 30m Blue Whale 的图")
+    assert chat.sent[-1].startswith("好，这段时间留给她自己玩") and "还剩 30 分钟" in chat.sent[-1]
+    assert "想逛的：Blue Whale 的图" in chat.sent[-1] and initiative.playing()
+    await dm(agent, chat, "!status")
+    assert "自由时间：到" in chat.sent[-1]
+    assert not await initiative.consider() and len(provider.bodies) == 1  # He only just left.
+    last = await agent.store.last_message_at(CHANNEL)
+    clock.t = last + 200
+    # Quiet hours and peak hours limit when she is given time; this time he gave himself.
+    initiative.settings = replace(agent.settings, agent_quiet_hours="00:00-23:59")
+    initiative.now = lambda: datetime(2026, 10, 27, 7, tzinfo=UTC)  # 15:00 Tuesday, Beijing.
+    assert not await initiative.consider() and sent == []
+    first = provider.bodies[1]
+    assert first["tools"] == provider.bodies[0]["tools"]
+    assert first["messages"][0] == provider.bodies[0]["messages"][0]  # The cached prefix.
+    nudge = first["messages"][-1]["content"]
+    assert "留了一段时间给你自己玩" in nudge and "这次想逛的：Blue Whale 的图" in nudge
+    assert "note_find" in nudge and "上一轮" not in nudge
+    results = [m["content"] for m in provider.bodies[2]["messages"] if m["role"] == "tool"]
+    assert results[1] == "记进「逛到的」了：蓝鲸"
+    play = initiative.play
+    assert play["steps"] == agent.settings.agent_play_steps - 2 and play["rounds"] == 1
+    assert play["carry"] == "刚看了蓝鲸，接下来想看座头鲸" and play["tokens"] == 30
+    # The next round begins with her note and what is already on today's page.
+    assert not await initiative.consider() and sent == []
+    again = provider.bodies[3]["messages"][-1]["content"]
+    assert "上一轮结束时你给自己留的话：刚看了蓝鲸" in again and "好大一只" in again
+    assert "刚看了蓝鲸" not in json.dumps(provider.bodies[3]["messages"][:-1], ensure_ascii=False)
+    assert initiative.play is None and not initiative.playing()  # She had enough.
+    assert Initiative(agent, None, clock=clock).play is None  # And it stays over.
+    # Telling him is the ordinary look's business, with its ordinary limits.
+    clock.t += HOUR
+    assert not await initiative.consider() and len(provider.bodies) == 4  # Quiet hours.
+    initiative.settings = agent.settings
+    assert not await initiative.consider() and len(provider.bodies) == 4  # Peak hours.
+    initiative.now = lambda: datetime(2026, 10, 22, 20, tzinfo=UTC)
+    assert await initiative.consider() and sent == ["我看到蓝鲸了"]
+    look = provider.bodies[4]["messages"][-1]["content"]
+    assert "那段时间到这儿结束了" in look and "这会儿是你自己的时间" in look
+    assert "上网逛了一圈（搜了 1 次，看了 0 个网页）" in look and "记了：蓝鲸" in look
+    assert "上网搜了「蓝鲸」" not in look  # The looking around is counted, not listed.
+    await dm(agent, chat, "!finds")
+    page = chat.sent[-1]
+    assert "蓝鲸\nhttps://r.example\n好大一只" in page and page.startswith("-# 她逛到的")
+    await dm(agent, chat, "!finds 2001-01-01")
+    assert chat.sent[-1] == "这一天她没记下什么"
+    await dm(agent, chat, "!finds yesterday")
+    assert "用法" in chat.sent[-1]
+
+
+async def test_she_takes_free_time_when_he_says_so_but_not_without_end(make_agent):
+    provider = Provider(
+        completion("", [("go_play", {"minutes": 600, "wish": "新出的游戏"})]),
+        completion("好耶，那我去逛啦"),
+    )
+    agent, initiative, clock, sent = await setup(make_agent, provider)
+    chat = Chat()
+    await say(agent, chat, "我去上班了，你自己去网上玩吧")
+    assert chat.sent == ["好耶，那我去逛啦"]
+    result = provider.bodies[1]["messages"][-1]["content"]
+    assert result.startswith("好了，他走开几分钟以后") and "还剩 180 分钟" in result  # Capped.
+    assert initiative.play["wish"] == "新出的游戏" and initiative.wake.is_set()
+    assert not await initiative.consider() and len(provider.bodies) == 2  # He was just here.
+    # Asking again while it runs changes nothing and is not counted.
+    assert initiative.grant(30, by_her=True).startswith("已经开着了")
+    assert len(initiative.self_grants) == 1
+    for _ in range(2):
+        assert initiative.stop_play()
+        initiative.grant(by_her=True)
+    assert "还剩 60 分钟" in initiative.play_status()  # No length given: an hour.
+    initiative.stop_play()
+    with pytest.raises(ToolError, match="!play"):
+        initiative.grant(by_her=True)
+    assert not initiative.playing()
+    clock.t += 25 * HOUR  # Another day.
+    assert "还剩 5 分钟" in initiative.grant(1, by_her=True)
+    # His own !play is never counted, and takes a wish without a length.
+    await dm(agent, chat, "!play off")
+    assert chat.sent[-1] == "好，自由时间收回了" and not initiative.playing()
+    await dm(agent, chat, "!play off")
+    assert chat.sent[-1] == "现在本来就没有自由时间"
+    await dm(agent, chat, "!play")
+    assert chat.sent[-1].startswith("自由时间：现在没有")
+    await dm(agent, chat, "!play 2h")
+    assert "还剩 120 分钟" in chat.sent[-1] and initiative.play["wish"] == ""
+    await dm(agent, chat, "!play 找找好看的壁纸")
+    assert "还剩 60 分钟" in chat.sent[-1] and initiative.play["wish"] == "找找好看的壁纸"
+
+
+async def test_free_time_ends_with_its_steps_and_waits_while_he_is_around(make_agent):
+    look = completion("", [("room_list", {})])
+    provider = Provider(completion("嗯"), look, look, look)
+    agent, initiative, clock, sent = await setup(
+        make_agent, provider, agent_play_steps=3, agent_play_round_steps=2
+    )
+    chat = Chat()
+    await say(agent, chat, "走啦")
+    clock.t = await agent.store.last_message_at(CHANNEL) + 200
+    initiative.grant(60)
+    agent.note_typing(CHANNEL)  # He is writing to her: not away after all.
+    assert not await initiative.consider() and len(provider.bodies) == 1
+    agent.owner_typing_at.clear()
+    assert not await initiative.consider() and len(provider.bodies) == 3
+    assert initiative.play["steps"] == 1 and initiative.play["carry"] == ""
+    assert "、1 步" in initiative.play_status()
+    assert not await initiative.consider() and len(provider.bodies) == 4
+    assert initiative.play["steps"] == 0 and not initiative.playing()
+    assert not await initiative.consider() and len(provider.bodies) == 4
+    assert initiative.play is None and initiative.play_over
+    # Time running out ends it the same way, before another request is made.
+    initiative.grant(10)
+    clock.t += 11 * 60
+    assert not await initiative.consider() and len(provider.bodies) == 4
+    assert initiative.play is None
+
+
+async def test_while_he_is_away_what_needs_his_say_so_waits(make_agent):
+    from discord_dfy.initiative import AwayChat
+
+    agent, initiative, clock, sent = await setup(make_agent, Provider())
+    away = AwayChat()
+
+    async def run(name, arguments, chat=away):
+        return await agent._run_tool(name, json.dumps(arguments), chat, CHANNEL)
+
+    refused = host_agent.AWAY_REFUSAL
+    assert await run("group_post", {"text": "大家好"}) == refused
+    assert await run("send_file", {"path": "a.md", "to": "群里"}) == refused
+    assert await run("update_profile", {"field": "avatar", "value": "a.png"}) == refused
+    assert await run("go_play", {"minutes": 60}) == refused and not initiative.playing()
+    # Her status is hers, and with him there the same calls go on to their own answers.
+    assert await run("update_profile", {"field": "status", "value": "逛街中"}) != refused
+    assert await run("group_post", {"text": "大家好"}, Chat()) != refused
+    assert (await run("go_play", {}, Chat())).startswith("好了") and initiative.playing()
+    # The notebook of finds is only there with the web, and wants real entries.
+    assert (await run("note_find", {"title": "鲸", "note": "大"})).startswith("错误：没有名为")
+    agent.web = FakeWeb()
+    assert "title" in await run("note_find", {"title": " ", "note": "大"})
+    assert "http" in await run("note_find", {"title": "鲸", "note": "大", "url": "file:///c:/x"})
+    assert await run("note_find", {"title": "鲸", "note": "大"}) == "记进「逛到的」了：鲸"
+    page = agent.finds.latest().read_text(encoding="utf-8")
+    assert page.startswith("# ") and page.count("## ") == 1 and page.endswith(" 鲸\n大\n")
+
+
+async def test_granting_free_time_wakes_the_loop_at_once(make_agent):
+    from discord_dfy.initiative import PLAY_REST_SECONDS
+
+    agent, initiative, clock, sent = await setup(make_agent, Provider())
+    naps, looked = asyncio.Queue(), asyncio.Event()
+
+    async def sleep(seconds):
+        naps.put_nowait(seconds)
+        await asyncio.Event().wait()  # A nap nothing ends on its own.
+
+    async def consider():
+        looked.set()
+
+    initiative.sleep, initiative.consider = sleep, consider
+    initiative.start()
+    assert await asyncio.wait_for(naps.get(), 5) >= 600  # The ordinary ten-minute check.
+    assert not looked.is_set()
+    initiative.grant(30)
+    await asyncio.wait_for(looked.wait(), 5)
+    # In her free time the rounds follow closely.
+    assert await asyncio.wait_for(naps.get(), 5) == PLAY_REST_SECONDS
+    await initiative.close()
+
+
+async def test_recent_dm_is_what_was_said_without_notes_hints_or_tool_calls(make_agent, store):
+    agent = await make_agent(Provider())
+    assert await agent.recent_dm(10) == []  # No DM yet.
+    call = {"id": "c1", "type": "function", "function": {"name": "room_list", "arguments": "{}"}}
+    await store.append(
+        CHANNEL,
+        [
+            {"role": "user", "content": "[2026-11-14 20:00] 昨天的话"},
+            {"role": "assistant", "content": "昨天的回答"},
+        ],
+    )
+    await store.new_conversation(CHANNEL)  # A new day's conversation; last night still counts.
+    await store.append(
+        CHANNEL,
+        [
+            {
+                "role": "user",
+                "content": f"{host_agent.NOTE_TAG} 你自己待着的时候做了这些：\n- 写了日记\n\n"
+                "[2026-11-15 21:00] 以后群里少用颜文字",
+            },
+            {"role": "assistant", "content": "", "tool_calls": [call]},
+            {"role": "tool", "tool_call_id": "c1", "content": "diary"},
+            {"role": "assistant", "content": "好\n记住了"},
+            {"role": "user", "content": host_agent.GO_ON_HINT},
+            {"role": "assistant", "content": host_agent.NO_OUTPUT},
+            {"role": "assistant", "content": f"{host_agent.UNSENT}\n没发出去的"},
+            {"role": "user", "content": "[2026-11-15 21:05] " + "长" * 900},
+        ],
+    )
+    said = await agent.recent_dm(10)
+    assert [(entry["who"], entry["text"][:9]) for entry in said] == [
+        ("主人", "昨天的话"),
+        ("你", "昨天的回答"),
+        ("主人", "以后群里少用颜文字"),
+        ("你", "好 记住了"),
+        ("主人", "长" * 9),
+    ]
+    assert all(len(entry["time"]) == len("11-15 21:00") for entry in said)
+    assert len(said[-1]["text"]) < 700  # A long message of his is cut.
+    assert [entry["text"] for entry in await agent.recent_dm(2)][0] == "好 记住了"
+    # Nothing older than a day: by then it is in her memory or it was not worth keeping.
+    await store.db.execute("UPDATE agent_messages SET created_at = created_at - 2 * 86400")
+    await store.db.commit()
+    assert await agent.recent_dm(10) == []

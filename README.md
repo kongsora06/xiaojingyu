@@ -88,8 +88,10 @@ Fetch API).
 | `!consolidate` | Fold weeks older than two weeks into the archive now |
 | `!self` | Show the self-portrait she wrote |
 | `!think` | Show or hide her thinking in DMs |
-| `!group`, `!group on/off`, `!group level 0-3`, `!quiet 30m` | Group chat controls |
+| `!group`, `!group on/off`, `!group level 0-3`, `!group dice on/off`, `!quiet 30m` | Group chat controls |
 | `!proactive on/off` | Let her message you first |
+| `!play 2h [what to look for]`, `!play`, `!play off` | Leave her a stretch of free time to roam the web on her own / see what is left / take it back |
+| `!finds`, `!finds 2026-11-15` | Read the notebook of what she found online |
 | `!restart` | Restart the bot (when run under the supervisor) |
 
 ## Data

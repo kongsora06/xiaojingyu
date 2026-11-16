@@ -43,6 +43,7 @@ class Settings:
     social_history_minutes: int = 120
     # Rounds she may go back and forth with another bot before a person speaks (0 = none).
     social_bot_rounds: int = 3
+    social_dm_messages: int = 20
     social_state_path: Path = Path("data/group_state.json")
     social_sticker_dir: Path = Path("data/stickers")
     personal_mode_enabled: bool = False
@@ -60,12 +61,19 @@ class Settings:
     agent_reflect_seconds: int = 600
     # A quick first-reaction call before each DM answer.
     agent_listen: bool = True
+    # After a DM answer he has not replied to, she sometimes gets a look to go on by herself.
+    agent_go_on: bool = True
     agent_initiative: bool = True
     agent_initiative_per_day: int = 0  # 0 = no daily cap.
     agent_initiative_idle_minutes: int = 30
     agent_quiet_hours: str = "03:00-11:00"
     # No reaching out on Beijing weekday peak hours (09-12, 14-18 UTC+8).
     agent_skip_peak: bool = True
+    # Free time he leaves her (!play, or telling her to go and play): the longest one
+    # stretch may be, its tool steps in all, and the steps in one round of it.
+    agent_play_max_minutes: int = 180
+    agent_play_steps: int = 300
+    agent_play_round_steps: int = 40
     # A fresh DM conversation each day (05:00); the day's talk is looked back over first.
     agent_daily_new: bool = True
     agent_show_tools: bool = True
@@ -179,6 +187,7 @@ class Settings:
             social_history_messages=integer("SOCIAL_HISTORY_MESSAGES", 50, 5, 200),
             social_history_minutes=integer("SOCIAL_HISTORY_MINUTES", 120, 5, 1440),
             social_bot_rounds=integer("SOCIAL_BOT_ROUNDS", 3, 0, 50),
+            social_dm_messages=integer("SOCIAL_DM_MESSAGES", 20, 0, 100),
             social_state_path=Path(state_path),
             social_sticker_dir=Path(
                 env.get("SOCIAL_STICKER_DIR", "data/stickers").strip() or "data/stickers"
@@ -196,11 +205,15 @@ class Settings:
             agent_memory_path=Path(memory_path),
             agent_reflect_seconds=integer("AGENT_REFLECT_SECONDS", 600, 0, 86400),
             agent_listen=boolean("AGENT_LISTEN", "true"),
+            agent_go_on=boolean("AGENT_GO_ON", "true"),
             agent_initiative=boolean("AGENT_INITIATIVE", "true"),
             agent_initiative_per_day=integer("AGENT_INITIATIVE_PER_DAY", 0, 0, 100),
             agent_initiative_idle_minutes=integer("AGENT_INITIATIVE_IDLE_MINUTES", 30, 10, 10080),
             agent_quiet_hours=quiet_hours,
             agent_skip_peak=boolean("AGENT_SKIP_PEAK", "true"),
+            agent_play_max_minutes=integer("AGENT_PLAY_MAX_MINUTES", 180, 10, 1440),
+            agent_play_steps=integer("AGENT_PLAY_STEPS", 300, 10, 5000),
+            agent_play_round_steps=integer("AGENT_PLAY_ROUND_STEPS", 40, 5, 200),
             agent_daily_new=boolean("AGENT_DAILY_NEW", "true"),
             agent_show_tools=boolean("AGENT_SHOW_TOOLS", "true"),
             agent_show_reasoning=boolean("AGENT_SHOW_REASONING", "false"),

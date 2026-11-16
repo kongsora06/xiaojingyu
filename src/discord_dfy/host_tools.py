@@ -32,6 +32,10 @@ MAX_REDIRECTS = 3
 # The showcase: the few things in her room she has put out for him to open.
 MAX_SHOWN = 24
 MAX_NOTE_CHARS = 200
+# One entry in the notebook of what she found online.
+MAX_FIND_TITLE_CHARS = 120
+MAX_FIND_URL_CHARS = 2000
+MAX_FIND_NOTE_CHARS = 4000
 BAD_NAME = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 
 TOOLS = [
@@ -232,6 +236,27 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "go_play",
+            "description": (
+                "主人亲口让你自己去玩、去网上逛、自己待一会儿的时候用"
+                "（比如他要出门、去忙、去睡，说“你自己玩去吧”“去网上逛逛吧”）："
+                "开一段你自己的自由时间，他走开以后你就可以放开了逛。"
+                "minutes 是他说的时长，他没说就不填；wish 是他提到想让你找的、"
+                "或者你自己想逛的东西，可以不填。"
+                "他没这么说就不用；你自己想多逛一会儿，先问他。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "minutes": {"type": "integer", "description": "多少分钟，不填是 60"},
+                    "wish": {"type": "string", "description": "想逛、想找的东西"},
+                },
+            },
+        },
+    },
 ]
 
 WEB_TOOLS = [
@@ -264,6 +289,27 @@ WEB_TOOLS = [
                 "type": "object",
                 "properties": {"url": {"type": "string"}},
                 "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "note_find",
+            "description": (
+                "把在网上逛到、查到的一样东西记进「逛到的」本子，自动记上时间。"
+                "这本不在你房间里，是你和主人共用的，他会翻。"
+                "title 是这是什么，url 是网址（有就写），note 是你看到了什么、自己怎么想的，"
+                "用自己的话随手记，不用写成报告。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "url": {"type": "string"},
+                    "note": {"type": "string"},
+                },
+                "required": ["title", "note"],
             },
         },
     },
@@ -527,6 +573,51 @@ class Room:
             raise ToolError(str(error)) from error
 
 
+class Finds:
+    """The notebook of what she came across online, a page a day (2026-11-15.md).
+
+    It sits outside her room: this one is for both of them, and he reads it (!finds).
+    """
+
+    def __init__(self, root: Path):
+        self.root = Path(root)
+
+    def page(self, day) -> Path:
+        return self.root / f"{day:%Y-%m-%d}.md"
+
+    def add(self, title, url, note, now: datetime) -> str:
+        title = " ".join(str(title or "").split())[:MAX_FIND_TITLE_CHARS]
+        note = str(note or "").strip()
+        if not title or not note:
+            raise ToolError("要写上这是什么（title）和你看到了什么（note）")
+        if len(note) > MAX_FIND_NOTE_CHARS:
+            raise ToolError(f"一条最多记 {MAX_FIND_NOTE_CHARS} 字，长的拆成几条")
+        url = str(url or "").strip()
+        if url and not url.startswith(("http://", "https://")):
+            raise ToolError("url 要写完整的 http(s) 网址，没有就不填")
+        path = self.page(now)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        head = "" if path.exists() else f"# {now:%Y-%m-%d} 逛到的\n"
+        link = f"{url[:MAX_FIND_URL_CHARS]}\n" if url else ""
+        with path.open("a", encoding="utf-8", newline="") as stream:
+            stream.write(f"{head}\n## {now:%H:%M} {title}\n{link}{note}\n")
+        return f"记进「逛到的」了：{title}"
+
+    def latest(self) -> Path | None:
+        """The newest page, or None before she has found anything."""
+        pages = sorted(self.root.glob("*.md")) if self.root.is_dir() else []
+        return pages[-1] if pages else None
+
+    def recent(self, limit: int) -> str:
+        """The end of the newest page, its day first: what she last put down."""
+        path = self.latest()
+        text = read_text(path).strip() if path is not None else ""
+        if not text:
+            return ""
+        body = text if len(text) <= limit else "……" + text[-limit:]
+        return f"（{path.stem} 那一页）\n{body}"
+
+
 def showcase_path(room_dir) -> Path:
     """The list of what she has put out. It sits next to the room, not in it, so nothing
     she writes in the room can change what he is allowed to open."""
@@ -656,6 +747,8 @@ def what_she_did(name: str, arguments: dict) -> str | None:
         return f"在群里发了 {path}"
     if name == "update_profile":
         return f"改了自己的{arguments.get('field', '')}"
+    if name == "note_find":
+        return f"在「逛到的」本子上记了：{str(arguments.get('title') or '').strip()[:60]}"
     return None  # Just looking around (reading, listing, viewing) is not worth a line.
 
 
@@ -686,6 +779,10 @@ def describe_call(name: str, arguments: dict) -> str:
         detail = arguments.get("query", "")
     elif name in {"web_fetch", "save_picture"}:
         detail = arguments.get("url") or arguments.get("source", "")
+    elif name == "note_find":
+        detail = f"{arguments.get('title', '')} {arguments.get('url') or ''}"
+    elif name == "go_play":
+        detail = f"{arguments.get('minutes') or ''} {arguments.get('wish') or ''}"
     elif name == "send_file" and to_group(arguments):
         detail = f"群里 {arguments.get('channel') or ''} {arguments.get('path', '')}"
     elif name == "room_show":

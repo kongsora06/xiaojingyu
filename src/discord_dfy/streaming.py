@@ -2,6 +2,17 @@
 
 from types import SimpleNamespace
 
+# What the host tells her along with his words (what she did while he was away, the group,
+# her mood for a quiz, a look to go on by herself). The viewer shows these without --verbose,
+# in a colour of their own; they are task-status events carrying this name, so the event
+# protocol stays as it is.
+NOTE = "note"
+
+
+def publish_notes(publisher, notes) -> None:
+    for note in notes:
+        publisher.event("task-status", status="running", name=NOTE, text=note)
+
 
 async def collect_stream(stream, publisher, request_id):
     """Rebuild a chat completion from deltas while mirroring thinking/text to the monitor."""
